@@ -16,7 +16,7 @@ search_exclude: false
 
 ---
 
-Code: https://github.com/athleticcoder21/kernels
+Code: [https://github.com/athleticcoder21/kernels](https://github.com/athleticcoder21/kernels)
 
 GEMV means GEneral Matrix Vector multiplication. Which is nothing but muliplication of a matrix with a Vector. 
 
