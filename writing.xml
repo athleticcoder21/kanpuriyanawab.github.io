@@ -10,7 +10,855 @@
 <atom:link href="https://heyyanshuman.com/writing.xml" rel="self" type="application/rss+xml"/>
 <description>Machine learning engineer building AI systems, open source software, and essays.</description>
 <generator>quarto-1.7.31</generator>
-<lastBuildDate>Fri, 08 May 2026 00:00:00 GMT</lastBuildDate>
+<lastBuildDate>Thu, 10 Sep 2026 00:00:00 GMT</lastBuildDate>
+<item>
+  <title>Writing a Performant Matrix-Vector Multiplication Kernel</title>
+  <link>https://heyyanshuman.com/posts/performant_gemv_kernel.html</link>
+  <description><![CDATA[ 
+
+
+
+
+
+<p>GEMV means GEneral Matrix Vector multiplication. Which is nothing but muliplication of a matrix with a Vector.</p>
+<p>In this worklog, we start from a naive kernel. Once we have done that we study this naive kernel and understand why it is not a performant one. By identifying the bottlenecks, we move on to implement a performant kernel that addresses all the concerns.</p>
+<p>Formally our goal is to compute:</p>
+<p><img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7By%7D_%7BM%20%5Ctimes%201%7D%20=%20%5Cmathbf%7BA%7D_%7BM%20%5Ctimes%20N%7D%20%5Ccdot%20%5Cmathbf%7Bx%7D_%7BN%20%5Ctimes%201%7D"></p>
+<p><img src="https://heyyanshuman.com/posts/assets/gemv_kernel/image1.png" class="img-fluid"></p>
+<section id="arithmetic-intensity" class="level2">
+<h2 class="anchored" data-anchor-id="arithmetic-intensity">Arithmetic intensity</h2>
+<p>Assume that all operands use FP32, so each element occupies 4 bytes. We also assume ideal memory behavior: the input vector <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7Bx%7D"> is loaded once and retained in cache, while every element of <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7BA%7D"> is read exactly once.</p>
+<section id="memory-access" class="level3">
+<h3 class="anchored" data-anchor-id="memory-access">Memory Access</h3>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th>Operation</th>
+<th style="text-align: right;">Elements transferred</th>
+<th style="text-align: right;">Bytes transferred</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Read matrix <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7BA%7D"></td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?MN"></td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?4MN"></td>
+</tr>
+<tr class="even">
+<td>Read input vector <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7Bx%7D"></td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?N"></td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?4N"></td>
+</tr>
+<tr class="odd">
+<td>Write output vector <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7By%7D"></td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?M"></td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?4M"></td>
+</tr>
+<tr class="even">
+<td><strong>Total</strong></td>
+<td style="text-align: right;"><strong><img src="https://latex.codecogs.com/png.latex?MN+N+M"></strong></td>
+<td style="text-align: right;"><strong><img src="https://latex.codecogs.com/png.latex?4(MN+N+M)"></strong></td>
+</tr>
+</tbody>
+</table>
+</section>
+<section id="computation" class="level3">
+<h3 class="anchored" data-anchor-id="computation">Computation</h3>
+<p>For each row of <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7BA%7D">, the dot product performs <img src="https://latex.codecogs.com/png.latex?N"> multiplications and <img src="https://latex.codecogs.com/png.latex?N-1"> additions. Therefore, the exact computational cost is</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0AM%5Cleft(N+(N-1)%5Cright)%20=%20M(2N-1)%20=%202MN-M%20%5Cquad%20%5Ctext%7BFLOPs%7D.%0A"></p>
+<p>The arithmetic intensity is the ratio of floating-point work to memory traffic:</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Cbegin%7Baligned%7D%0AAI(M,N)%0A%20%20&amp;=%20%5Cfrac%7B%5Ctext%7BFLOPs%7D%7D%7B%5Ctext%7Bbytes%20transferred%7D%7D%20%5C%5C%0A%20%20&amp;=%20%5Cfrac%7BM(2N-1)%7D%7B4(MN+N+M)%7D%20%5C%5C%0A%20%20&amp;=%20%5Cfrac%7B2MN-M%7D%7B4(MN+N+M)%7D%0A%20%20%20%20%20%5Cquad%20%5Ctext%7BFLOPs/byte%7D.%0A%5Cend%7Baligned%7D%0A"></p>
+<p>When both <img src="https://latex.codecogs.com/png.latex?M"> and <img src="https://latex.codecogs.com/png.latex?N"> are large, <img src="https://latex.codecogs.com/png.latex?MN"> dominates <img src="https://latex.codecogs.com/png.latex?M"> and <img src="https://latex.codecogs.com/png.latex?N">. Hence,</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0AAI(M,N)%20%5Capprox%20%5Cfrac%7B2MN%7D%7B4MN%7D%0A%20%20%20%20%20%20%20%20%20%20%20=%20%5Cfrac%7B1%7D%7B2%7D%0A%20%20%20%20%20%20%20%20%20%20%20=%200.5%20%5Cquad%20%5Ctext%7BFLOPs/byte%7D.%0A"></p>
+<p>That means we perform 1 floating point operation for every 2 bytes read from memory. This <strong>low arithmetic intensity</strong> makes GEMV <strong>memory-bound</strong> on most modern processors. Consequently, the rate at which the processor can read <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7BA%7D"> usually limits performance before its floating-point units are saturated. Under the roofline model, the maximum attainable performance is bounded by</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0AP%20%5Cleq%20%5Cmin%5C!%5Cleft(P_%7B%5Ctext%7Bpeak%7D%7D,%5C;%20AI%20%5Ctimes%20B_%7B%5Ctext%7Bmemory%7D%7D%5Cright),%0A"></p>
+<p>where <img src="https://latex.codecogs.com/png.latex?P_%7B%5Ctext%7Bpeak%7D%7D"> is peak compute throughput and <img src="https://latex.codecogs.com/png.latex?B_%7B%5Ctext%7Bmemory%7D%7D"> is memory bandwidth. With <img src="https://latex.codecogs.com/png.latex?AI%20%5Capprox%200.5"> FLOPs/byte, a processor with memory bandwidth <img src="https://latex.codecogs.com/png.latex?B_%7B%5Ctext%7Bmemory%7D%7D"> can sustain at most approximately <img src="https://latex.codecogs.com/png.latex?0.5B_%7B%5Ctext%7Bmemory%7D%7D"> FLOPs/s for GEMV, unless the matrix is already resident in a faster level of the memory hierarchy.</p>
+<div class="callout callout-style-default callout-note callout-titled" title="Row-major indexing refresher">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+Row-major indexing refresher
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Although we reason about <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7BA%7D"> as a two-dimensional matrix, it occupies one linear region of memory. CUDA lays out the entries row by row, so an entry at <code>(row, column)</code> has offset</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Coperatorname%7Boffset%7D(A_%7B%5Ctext%7Brow%7D,%5Ctext%7Bcolumn%7D%7D)%0A%20%20=%20%5Ctext%7Brow%7D%20%5Ctimes%20N%20+%20%5Ctext%7Bcolumn%7D.%0A"></p>
+<p>Equivalently,</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0AA_%7B%5Ctext%7Brow%7D,%5Ctext%7Bcolumn%7D%7D%0A%20%20=%20A%5B%5Ctext%7Brow%7D%20%5Ctimes%20N%20+%20%5Ctext%7Bcolumn%7D%5D.%0A"></p>
+<p>For example, when <img src="https://latex.codecogs.com/png.latex?N=4">, the element <img src="https://latex.codecogs.com/png.latex?A_%7B2,2%7D"> is found at</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A2%20%5Ctimes%204%20+%202%20=%2010,%0A%5Cqquad%0AA_%7B2,2%7D%20=%20A%5B10%5D.%0A"></p>
+<p><img src="https://heyyanshuman.com/posts/assets/gemv_kernel/naive_gemv_memory_layout_v2.svg" class="img-fluid" style="width:100.0%" alt="A three by four matrix is flattened into a single row of twelve memory locations. The highlighted element A[2,2] maps to offset 2 times 4 plus 2, which is linear index 10."></p>
+</div>
+</div>
+</section>
+<section id="algorithm" class="level3">
+<h3 class="anchored" data-anchor-id="algorithm"><strong>Algorithm</strong></h3>
+<p>GEMV has a particularly simple decomposition: every output element is the dot product of one row of <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7BA%7D"> with the same input vector <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7Bx%7D">. For row <img src="https://latex.codecogs.com/png.latex?i%20%5Cin%20%5C%7B0,%20%5Cldots,%20M-1%5C%7D">,</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0Ay_i%20=%20%5Csum_%7Bj=0%7D%5E%7BN-1%7D%20A_%7Bi,j%7Dx_j.%0A"></p>
+<p>The <img src="https://latex.codecogs.com/png.latex?M"> dot products are independent, so we can assign row <img src="https://latex.codecogs.com/png.latex?i"> to one thread: that thread reads row <img src="https://latex.codecogs.com/png.latex?i"> of <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7BA%7D">, multiplies its entries by <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7Bx%7D">, accumulates the products, and writes <img src="https://latex.codecogs.com/png.latex?y_i">.</p>
+<p><img src="https://heyyanshuman.com/posts/assets/gemv_kernel/naive_gemv_execution.svg" class="img-fluid" style="width:100.0%" alt="Naive GEMV access pattern. Each thread traverses one contiguous row of flattened A, uses the shared vector x, and writes one element of y."></p>
+<div class="sourceCode" id="cb1" style="background: #f1f3f5;"><pre class="sourceCode cpp code-with-copy"><code class="sourceCode cpp"><span id="cb1-1">__global__ <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">void</span> naive_gemv_kernel<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span></span>
+<span id="cb1-2">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> A<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb1-3">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> x<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb1-4">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> y<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb1-5">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> M<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb1-6">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> N</span>
+<span id="cb1-7"><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span></span>
+<span id="cb1-8">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> row <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> blockDim<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">.</span>x <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> blockIdx<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">.</span>x <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> threadIdx<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">.</span>x<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb1-9"></span>
+<span id="cb1-10">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">if</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span>row <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&lt;</span> M<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span></span>
+<span id="cb1-11">        <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span> sum <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.0</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb1-12"></span>
+<span id="cb1-13">        <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">for</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> column <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span> column <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&lt;</span> N<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">++</span>column<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span></span>
+<span id="cb1-14">            sum <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> A<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">[</span>row <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> N <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> column<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">]</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> x<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">[</span>column<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">];</span></span>
+<span id="cb1-15">        <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span>
+<span id="cb1-16"></span>
+<span id="cb1-17">        y<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">[</span>row<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">]</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> sum<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb1-18">    <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span>
+<span id="cb1-19"><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span>
+<span id="cb1-20"></span>
+<span id="cb1-21"><span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">void</span> launch_kernel<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span></span>
+<span id="cb1-22">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> <span class="ex" style="color: null;
+background-color: null;
+font-style: inherit;">__restrict__</span> A<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb1-23">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> <span class="ex" style="color: null;
+background-color: null;
+font-style: inherit;">__restrict__</span> x<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb1-24">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> <span class="ex" style="color: null;
+background-color: null;
+font-style: inherit;">__restrict__</span> y<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb1-25">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> M<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb1-26">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> N    </span>
+<span id="cb1-27"><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span></span>
+<span id="cb1-28">    dim3 block_size<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">1024</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">);</span> </span>
+<span id="cb1-29">    dim3 grid_size<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span>ceil_division<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span>M<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> block_size<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">.</span>x<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">));</span></span>
+<span id="cb1-30"></span>
+<span id="cb1-31">    naive_gemv_kernel<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&lt;&lt;&lt;</span>grid_size<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> block_size<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&gt;&gt;&gt;(</span>A<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> x<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> y<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> M<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> N<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">);</span></span>
+<span id="cb1-32"><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span></code></pre></div>
+<p>So, we just wrote a program that calculates the matrix vector product in parallel. Since we are doing in parallel we are gonna save so much time. Sounds neat and perfect right? Except it isn’t.</p>
+<p>Remember what we discussed earlier while calculating Arithmatic Intesity? FLOPs and Memory. We might be doing all the computation efficiently, but turns out that we have overlooked a subtle thing, that defeats the optimization. It’s memory access pattern.</p>
+<p>Now is the ideal time to introduce you to concept of <strong><em>warp</em></strong>. A warp is the fundamental execution unit on NVIDIA GPU (well AMD loves to call it wavefront). And each warp has exactly 32 threads. This holds true for all NVIDIA architectures (as of writing this article, Ampere, Hopper, Blackwell).</p>
+<p>The important thing here is that GPUs can achieve high memory bandwidth by reading or writing a wide chunk of memory at once.</p>
+<p>Let’s see what that means for the kernel we just wrote. Consider the first warp in the first block. Since <code>blockIdx.x = 0</code>, threads 0 through 31 are assigned rows 0 through 31. Now freeze all of them at the first loop iteration, where <code>column = 0</code>:</p>
+<pre class="text"><code>Thread 0:  row = 0,  accesses A[0 * N + 0]  = A[0]
+Thread 1:  row = 1,  accesses A[1 * N + 0]  = A[N]
+Thread 2:  row = 2,  accesses A[2 * N + 0]  = A[2N]
+Thread 3:  row = 3,  accesses A[3 * N + 0]  = A[3N]
+...
+Thread 31: row = 31, accesses A[31 * N + 0] = A[31N]</code></pre>
+<p>For this first warp, the thread number is also its row number. At any column, the linear index requested by a thread is simply</p>
+<pre class="text"><code>index = threadIdx.x * N + column</code></pre>
+<p>At <code>column = 0</code>, this becomes <code>threadIdx.x * N</code>, giving us the sequence <img src="https://latex.codecogs.com/png.latex?0,N,2N,%5Cldots,31N"> shown above.</p>
+<p>See the problem? These 32 neighboring threads are not reading 32 neighboring elements. Every pair of threads is separated by an entire row - exactly <img src="https://latex.codecogs.com/png.latex?N"> floats in memory.</p>
+<p><img src="https://heyyanshuman.com/posts/assets/gemv_kernel/naive_gemv_noncontiguous_access.svg" class="img-fluid" style="width:100.0%" alt="The first warp of the naive GEMV kernel accessing column zero. Threads zero, one, two, three, and thirty-one access A[0,0], A[1,0], A[2,0], A[3,0], and A[31,0]. In row-major linear memory these elements are at indices zero, N, two N, three N, and thirty-one N, showing a stride of N between neighboring threads."></p>
+<p>For a typical case where <img src="https://latex.codecogs.com/png.latex?N=8192">, thread 0 reads <code>A[0]</code> while thread 1 reads <code>A[8192]</code>. That is a gap of 8192 floats, or 32,768 bytes. Thread 2 is another 32,768 bytes away, and the same pattern continues across the entire warp.</p>
+<p>Why is that bad? Because global memory is fetched in aligned chunks. When the 32 threads in a warp ask for consecutive FP32 values, their requests can be combined into just a few memory transactions. But here the requests are so far apart that, for a large <img src="https://latex.codecogs.com/png.latex?N">, each thread can require a separate transaction. The GPU may need to perform as many as 32 memory transactions for one load instruction, even though each thread only wanted a single 4-byte value.</p>
+<p>And this is not a one-time penalty. The same pattern repeats at <code>column = 1</code>, then <code>column = 2</code>, and so on for every column in the matrix:</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Cbegin%7Baligned%7D%0A%5Ctext%7Bcolumn%20%7D0%20&amp;:%200,%5C;N,%5C;2N,%5C;3N,%5Cldots%20%5C%5C%0A%5Ctext%7Bcolumn%20%7D1%20&amp;:%201,%5C;N+1,%5C;2N+1,%5C;3N+1,%5Cldots%20%5C%5C%0A%5Ctext%7Bcolumn%20%7D2%20&amp;:%202,%5C;N+2,%5C;2N+2,%5C;3N+2,%5Cldots%0A%5Cend%7Baligned%7D%0A"></p>
+<p>So although each individual thread walks through its own row sequentially, the warp as a whole performs a non-contiguous, strided access at every iteration. That is why this innocent-looking kernel leaves so much memory bandwidth on the table.</p>
+</section>
+<section id="okay-but-how-bad-is-bad" class="level3">
+<h3 class="anchored" data-anchor-id="okay-but-how-bad-is-bad">Okay, but how bad is bad?</h3>
+<p>We can actually connect this back to the arithmetic-intensity calculation from the beginning of the article.</p>
+<p>The time spent moving data is approximately</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0AT_%7B%5Ctext%7Bmemory%7D%7D%0A%20%20%5Capprox%0A%20%20%5Cfrac%7B%5Ctext%7Bbytes%20transferred%7D%7D%7B%5Ctext%7Bmemory%20bandwidth%7D%7D.%0A"></p>
+<p>This equation is almost painfully simple. If two kernels perform the same amount of arithmetic, but one of them forces the GPU to transfer more bytes, that kernel takes longer. And because GEMV is already memory-bound, there is very little computation available to hide that extra time.</p>
+<p>Earlier, we calculated the <em>ideal</em> arithmetic intensity as 0.5 FLOPs/byte, which was already low.</p>
+<p>Remember, it means that for every byte delivered by memory, the GPU gets only half a floating-point operation to perform. Or, said another way, we need roughly 2 bytes of memory traffic for every FLOP. Modern GPUs can perform arithmetic much faster than they can feed data from global memory, so a kernel with such low arithmetic intensity hits the bandwidth ceiling long before it reaches peak compute throughput.</p>
+<p>But there is an important word hiding in our calculation: <strong>ideal</strong>.</p>
+<p>This assumes that when GEMV asks for 4 bytes, only those useful 4 bytes are counted. In practice the memory transactions do not work at the granularity of one float. The GPU fetches aligned chunks of memory. If the rest of a fetched chunk is not used by the warp, those bytes still travelled through the memory system - we just got no computation out of them.</p>
+<p>Let us describe this waste using <strong>memory-transaction efficiency</strong>:</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Ceta_A%0A%20%20=%20%5Cfrac%7B%5Ctext%7Buseful%20bytes%20of%20%7DA%7D%0A%20%20%20%20%20%20%20%20%20%20%20%7B%5Ctext%7Bbytes%20actually%20transferred%20for%20%7DA%7D.%0A"></p>
+<p>With perfectly coalesced matrix loads, <img src="https://latex.codecogs.com/png.latex?%5Ceta_A"> can approach 1. The warp uses almost everything it fetches. However, the access pattern we just used in our naïve kernel, gives:</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Ceta_A%0A%20%20=%20%5Cfrac%7B32%20%5Ctimes%204%7D%7B32%20%5Ctimes%2032%7D%0A%20%20=%20%5Cfrac%7B128%7D%7B1024%7D%0A%20%20=%20%5Cfrac%7B1%7D%7B8%7D%0A%20%20=%2012.5%5C%25.%0A"></p>
+<p>So reading the <img src="https://latex.codecogs.com/png.latex?4MN"> useful bytes of <img src="https://latex.codecogs.com/png.latex?A"> may force the GPU to transfer</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Cfrac%7B4MN%7D%7B%5Ceta_A%7D%0A"></p>
+<p>bytes through the memory system. If we keep the same ideal caching assumption for <img src="https://latex.codecogs.com/png.latex?x"> and note that the writes to consecutive elements of <img src="https://latex.codecogs.com/png.latex?y"> are coalesced, our effective arithmetic intensity becomes</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0AAI_%7B%5Ctext%7Beffective%7D%7D%0A%20%20=%20%5Cfrac%7BM(2N-1)%7D%0A%20%20%20%20%20%20%20%20%20%20%20%7B%5Cfrac%7B4MN%7D%7B%5Ceta_A%7D+4N+4M%7D.%0A"></p>
+<p>For large <img src="https://latex.codecogs.com/png.latex?M"> and <img src="https://latex.codecogs.com/png.latex?N">, the matrix term dominates everything else, so</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0AAI_%7B%5Ctext%7Beffective%7D%7D%0A%20%20%5Capprox%0A%20%20%5Cfrac%7B2MN%7D%7B4MN/%5Ceta_A%7D%0A%20%20=%20%5Cfrac%7B%5Ceta_A%7D%7B2%7D.%0A"></p>
+<p>Now we can see exactly how the access pattern makes an already memory-bound algorithm even worse:</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Cbegin%7Baligned%7D%0A%5Ctext%7Bcoalesced%20%7D(%5Ceta_A%20%5Capprox%201)%0A%20%20&amp;:%20AI_%7B%5Ctext%7Beffective%7D%7D%20%5Capprox%200.5%5C%20%5Ctext%7BFLOPs/byte%7D,%5C%5C%0A%5Ctext%7Buncoalesced%20%7D(%5Ceta_A%20%5Capprox%201/8)%0A%20%20&amp;:%20AI_%7B%5Ctext%7Beffective%7D%7D%20%5Capprox%200.0625%5C%20%5Ctext%7BFLOPs/byte%7D.%0A%5Cend%7Baligned%7D%0A"></p>
+<p>We are performing the same FLOPs, but because of our choice of memory access now each useful matrix byte is costing us eight transferred bytes.</p>
+<div class="callout callout-style-default callout-important callout-titled" title="What are we really optimizing?">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+What are we really optimizing?
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Contiguous access does not magically increase GEMV’s theoretical arithmetic intensity - it is still approximately <img src="https://latex.codecogs.com/png.latex?0.5"> FLOPs/byte. What it does is stop bad memory transactions from reducing the <em>effective</em> arithmetic intensity even further. Coalescing gives us a chance to use the GPU’s available memory bandwidth instead of throwing most of it away.</p>
+</div>
+</div>
+<p>That is now our target. GEMV will remain memory-bound, but if neighboring threads access neighboring elements, we can make those expensive memory transactions carry useful data. The next question is: how do we rearrange the work so that a warp walks across a row instead of jumping between rows?</p>
+</section>
+<section id="what-access-pattern-do-we-actually-want" class="level3">
+<h3 class="anchored" data-anchor-id="what-access-pattern-do-we-actually-want">What access pattern do we actually want?</h3>
+<p>In the naïve kernel, neighboring threads work on different rows. That is why their addresses are <img src="https://latex.codecogs.com/png.latex?N"> elements apart.</p>
+<p>What if we flip that around? Instead of giving an entire row to one thread, we give an entire row to one warp. All 32 threads now work on the same <code>row</code>.</p>
+<p>Let us start with the first pass through the loop:</p>
+<pre class="text"><code>thread 0  -&gt; column 0
+thread 1  -&gt; column 1
+thread 2  -&gt; column 2
+...
+thread 31 -&gt; column 31</code></pre>
+<p>Since all threads share the same row, they access</p>
+<pre class="text"><code>thread 0  -&gt; A[row * N + 0]
+thread 1  -&gt; A[row * N + 1]
+thread 2  -&gt; A[row * N + 2]
+...
+thread 31 -&gt; A[row * N + 31]</code></pre>
+<p>These are 32 adjacent elements in memory. The distance between thread 0 and thread 1 is no longer <img src="https://latex.codecogs.com/png.latex?N"> elements. It is exactly one element.</p>
+<p>Once those first 32 columns are done, every thread moves forward by 32:</p>
+<pre class="text"><code>thread 0  -&gt; column 32
+thread 1  -&gt; column 33
+thread 2  -&gt; column 34
+...
+thread 31 -&gt; column 63</code></pre>
+<p>So the second pass accesses</p>
+<pre class="text"><code>A[row * N + 32], A[row * N + 33], ..., A[row * N + 63]</code></pre>
+<p>Again, the warp reads one contiguous chunk.</p>
+<p>That gives us the only indexing rule we need:</p>
+<pre class="text"><code>column = threadIdx.x + 32 * pass
+index  = row * N + column</code></pre>
+<p>Here, <code>pass</code> simply means how many times the warp has gone through the loop: 0 for columns 0–31, 1 for columns 32–63, 2 for columns 64–95, and so on.</p>
+<p>One thread jumps by 32 elements over time, but all 32 threads together access neighboring elements during every pass. This is the same subtle distinction we saw earlier, now working in our favour.</p>
+<p><img src="https://heyyanshuman.com/posts/assets/gemv_kernel/coalesced_gemv_warp_access_v2.svg" class="img-fluid" style="width:100.0%" alt="A coalesced GEMV access pattern in which one warp owns one matrix row. On the first pass threads zero through thirty-one access adjacent columns zero through thirty-one. On the second pass the same threads access adjacent columns thirty-two through sixty-three. Each pass uses four contiguous 32-byte sectors, transferring 128 useful bytes in 128 bytes of memory traffic."></p>
+<p>Under our 32-byte-sector model, 32 adjacent FP32 loads request 128 useful bytes and transfer 128 bytes:</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Ceta_A%5E%7B%5Ctext%7Bcoalesced%7D%7D%0A%20%20=%20%5Cfrac%7B32%5Ctimes4%7D%7B4%5Ctimes32%7D%0A%20%20=1.%0A"></p>
+<p>Plugging that back into the effective arithmetic intensity gives us</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0AAI_%7B%5Ctext%7Beffective%7D%7D%0A%20%20%5Capprox%20%5Cfrac%7B%5Ceta_A%7D%7B2%7D%0A%20%20%5Capprox%200.5%5C%20%5Ctext%7BFLOPs/byte%7D.%0A"></p>
+<p><strong>Boom!</strong></p>
+<p>We did not make GEMV less memory-bound. All we did is to recover the best-case <img src="https://latex.codecogs.com/png.latex?AI"> that GEMV was supposed to have in the first place. The naive mapping pushed it down towards <img src="https://latex.codecogs.com/png.latex?0.0625"> FLOPs/byte; the coalesced mapping brings it back towards <img src="https://latex.codecogs.com/png.latex?0.5"> FLOPs/byte and lets us make useful work out of the bandwidth the GPU is already spending.</p>
+<p>There is one consequence of splitting a row across 32 threads: no single thread computes the complete dot product anymore.</p>
+<p>Take a row with <img src="https://latex.codecogs.com/png.latex?N=64">. During the first pass, the threads compute</p>
+<pre class="text"><code>thread 0  -&gt; partial_sum += A[row, 0]  * x[0]
+thread 1  -&gt; partial_sum += A[row, 1]  * x[1]
+thread 2  -&gt; partial_sum += A[row, 2]  * x[2]
+...
+thread 31 -&gt; partial_sum += A[row, 31] * x[31]</code></pre>
+<p>During the second pass, those same threads move forward by 32 columns:</p>
+<pre class="text"><code>thread 0  -&gt; partial_sum += A[row, 32] * x[32]
+thread 1  -&gt; partial_sum += A[row, 33] * x[33]
+thread 2  -&gt; partial_sum += A[row, 34] * x[34]
+...
+thread 31 -&gt; partial_sum += A[row, 63] * x[63]</code></pre>
+<p>After the loop, thread 0 holds the contributions from columns 0 and 32, thread 1 holds the contributions from columns 1 and 33, and so on. The complete dot product is now spread across 32 different <code>partial_sum</code> values:</p>
+<pre class="text"><code>y[row] = partial_sum from thread 0
+       + partial_sum from thread 1
+       + ...
+       + partial_sum from thread 31</code></pre>
+<p>So fixing the memory access created one small cleanup job: before writing <code>y[row]</code>, the warp must reduce its 32 partial sums into one final sum. We’ll handle this cleanup by our little utility function <code>warpReduceSum</code> below</p>
+</section>
+<section id="turning-that-access-pattern-into-code" class="level3">
+<h3 class="anchored" data-anchor-id="turning-that-access-pattern-into-code">Turning that access pattern into code</h3>
+<p>Alright, the mapping is clear now:</p>
+<pre class="text"><code>block 0 -&gt; row 0 -&gt; y[0]
+block 1 -&gt; row 1 -&gt; y[1]
+block 2 -&gt; row 2 -&gt; y[2]
+...</code></pre>
+<p>Each block contains exactly 32 threads, so one block is one warp. Inside that warp, thread 0 handles columns <img src="https://latex.codecogs.com/png.latex?0,32,64,%5Cldots">, thread 1 handles columns <img src="https://latex.codecogs.com/png.latex?1,33,65,%5Cldots">, and so on.</p>
+<div class="sourceCode" id="cb13" style="background: #f1f3f5;"><pre class="sourceCode cpp code-with-copy"><code class="sourceCode cpp"><span id="cb13-1">__device__ __forceinline__ <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span> warpReduceSum<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span> value<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span></span>
+<span id="cb13-2">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">for</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> offset <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">16</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span> offset <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&gt;</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span> offset <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/=</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span></span>
+<span id="cb13-3">        value <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+=</span> __shfl_down_sync<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="bn" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0xffffffff</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> value<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> offset<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">);</span></span>
+<span id="cb13-4">    <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span>
+<span id="cb13-5">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">return</span> value<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb13-6"><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span>
+<span id="cb13-7"></span>
+<span id="cb13-8">__global__ <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">void</span> performant_gemv_kernel<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span></span>
+<span id="cb13-9">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> A<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb13-10">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> x<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb13-11">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> y<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb13-12">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> M<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb13-13">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> N    </span>
+<span id="cb13-14"><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span></span>
+<span id="cb13-15">    <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">// Ensure block size equals warp size for optimal performance</span></span>
+<span id="cb13-16">    <span class="ot" style="color: #003B4F;
+background-color: null;
+font-style: inherit;">assert</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span>blockDim<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">.</span>x <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">==</span> warpSize<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">);</span></span>
+<span id="cb13-17"></span>
+<span id="cb13-18">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> block_id <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> blockIdx<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">.</span>x<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb13-19">    </span>
+<span id="cb13-20">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">if</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span>block_id <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&gt;=</span> M<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span></span>
+<span id="cb13-21">        <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">return</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb13-22"></span>
+<span id="cb13-23">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> thread_id <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> threadIdx<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">.</span>x<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb13-24"></span>
+<span id="cb13-25">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span> partial_sum <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.</span><span class="bu" style="color: null;
+background-color: null;
+font-style: inherit;">f</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb13-26"></span>
+<span id="cb13-27">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">for</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> column <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> thread_id<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span> column <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&lt;</span> N<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span> column <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+=</span> warpSize<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span></span>
+<span id="cb13-28">        partial_sum <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+=</span> A<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">[</span>block_id <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> N <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> column<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">]</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> x<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">[</span>column<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">];</span></span>
+<span id="cb13-29">    <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span>
+<span id="cb13-30"></span>
+<span id="cb13-31">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span> sum <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> warpReduceSum<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span>partial_sum<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">);</span></span>
+<span id="cb13-32"></span>
+<span id="cb13-33">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">if</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span>thread_id <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">==</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">){</span></span>
+<span id="cb13-34">        y<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">[</span>block_id<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">]</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> sum<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb13-35">    <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span>
+<span id="cb13-36"><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span>
+<span id="cb13-37"></span>
+<span id="cb13-38"></span>
+<span id="cb13-39"><span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">void</span> launch_kernel<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span></span>
+<span id="cb13-40">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> <span class="ex" style="color: null;
+background-color: null;
+font-style: inherit;">__restrict__</span> A<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb13-41">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> <span class="ex" style="color: null;
+background-color: null;
+font-style: inherit;">__restrict__</span> x<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb13-42">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> <span class="ex" style="color: null;
+background-color: null;
+font-style: inherit;">__restrict__</span> y<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb13-43">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> M<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb13-44">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> N    </span>
+<span id="cb13-45"><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span></span>
+<span id="cb13-46">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> num_threads <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">32</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb13-47"></span>
+<span id="cb13-48">    dim3 block_size<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span>num_threads<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">);</span> </span>
+<span id="cb13-49">    dim3 grid_size<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span>M<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">);</span></span>
+<span id="cb13-50"></span>
+<span id="cb13-51">    performant_gemv_kernel<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&lt;&lt;&lt;</span>grid_size<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> block_size<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&gt;&gt;&gt;(</span>A<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> x<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> y<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> M<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> N<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">);</span></span>
+<span id="cb13-52"><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span></code></pre></div>
+<div class="callout callout-style-default callout-note callout-titled" title="How does warpReduceSum work?">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+How does warpReduceSum work?
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Recall that a lane is a thread’s position inside its warp, numbered from 0 to 31. Since our block contains exactly one warp, thread 0 is lane 0, thread 1 is lane 1, and so on.</p>
+<p><code>__shfl_down_sync</code> lets one lane read a value held in another lane’s register. For example,</p>
+<div class="sourceCode" id="cb14" style="background: #f1f3f5;"><pre class="sourceCode cpp code-with-copy"><code class="sourceCode cpp"><span id="cb14-1">value <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+=</span> __shfl_down_sync<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="bn" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0xffffffff</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> value<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">16</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">);</span></span></code></pre></div>
+<p>means that lane 0 adds the value from lane 16, lane 1 adds the value from lane 17, and so on. The loop repeats this operation with progressively smaller offsets:</p>
+<pre class="text"><code>offset 16 -&gt; 32 partial sums become 16 groups of 2
+offset  8 -&gt; 16 groups become 8 groups of 4
+offset  4 -&gt;  8 groups become 4 groups of 8
+offset  2 -&gt;  4 groups become 2 groups of 16
+offset  1 -&gt;  2 groups become 1 group of 32</code></pre>
+<p>After these five steps, lane 0 contains the sum of all 32 original <code>partial_sum</code> values. The complete sum is not available in every lane, which is why only thread 0 writes the result:</p>
+<div class="sourceCode" id="cb16" style="background: #f1f3f5;"><pre class="sourceCode cpp code-with-copy"><code class="sourceCode cpp"><span id="cb16-1"><span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">if</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span>thread_id <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">==</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span></span>
+<span id="cb16-2">    y<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">[</span>block_id<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">]</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> sum<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb16-3"><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span></code></pre></div>
+<p>The naive kernel did not need this reduction, so yes, we have introduced some extra work. But for a row containing thousands of values, five register-level shuffle-and-add steps are a tiny price to pay for replacing scattered matrix loads with contiguous ones. We traded a little communication inside the warp for dramatically better use of global-memory bandwidth—which is exactly the trade a memory-bound kernel wants us to make.</p>
+</div>
+</div>
+
+
+</section>
+</section>
+
+ ]]></description>
+  <category>LLMs</category>
+  <category>Performance Optimization</category>
+  <guid>https://heyyanshuman.com/posts/performant_gemv_kernel.html</guid>
+  <pubDate>Thu, 10 Sep 2026 00:00:00 GMT</pubDate>
+</item>
 <item>
   <title>Illustrated RLVR</title>
   <link>https://heyyanshuman.com/posts/rlvr.html</link>
