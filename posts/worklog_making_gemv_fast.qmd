@@ -1,8 +1,8 @@
 ---
 title: "Making GEMV Fast"
 aliases:
-- /performant-gemv-kernel
-permalink: /performant-gemv-kernel
+- /making-gemv-fast
+permalink: /making-gemv-fast
 badges: false
 toc: true
 categories:
@@ -11,7 +11,7 @@ categories:
 date: '2026-09-10'
 description: A worklog on optimizing a CUDA GEMV kernel—from arithmetic intensity and uncoalesced loads to a warp-per-row implementation that makes every byte count.
 hide: false
-output-file: performant_gemv_kernel.html
+output-file: making_gemv_fast.html
 search_exclude: false
 
 ---
