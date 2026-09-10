@@ -18,9 +18,6 @@ I got into ML through open source. My first PR was a small fix to DeepMind's Opt
 
 After GSoC I gave talks in 11 cities across India. I still speak at conferences when I have something worth saying.
 
-On weekends I build things — an [agentic browser](https://github.com/kanpuriyanawab/nebula), a [Claude Cowork alternative](https://github.com/kanpuriyanawab/sidekick), a Figma plugin I made without ever having used Figma. Most of these don't go anywhere. Some do. 
-
-I've been writing about it in [The Conductor](https://conductorbyam.substack.com/), though lately I'm figuring out what comes next.
 
 ---
 
