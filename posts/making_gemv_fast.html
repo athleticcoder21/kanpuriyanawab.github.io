@@ -7,7 +7,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
 
 <meta name="dcterms.date" content="2026-09-10">
-<meta name="description" content="A worklog on optimizing a CUDA GEMV kernel—from arithmetic intensity and uncoalesced loads to a warp-per-row implementation that makes every byte count.">
+<meta name="description" content="A worklog on optimizing Matrix Vector Multiplication kernel in CUDA">
 
 <title>Making GEMV Fast – Anshuman Mishra</title>
 <style>
@@ -130,14 +130,14 @@ window.Quarto = {
 
 <link rel="stylesheet" href="../site.css">
 <meta property="og:title" content="Making GEMV Fast – Anshuman Mishra">
-<meta property="og:description" content="A worklog on optimizing a CUDA GEMV kernel—from arithmetic intensity and uncoalesced loads to a warp-per-row implementation that makes every byte count.">
+<meta property="og:description" content="A worklog on optimizing Matrix Vector Multiplication kernel in CUDA">
 <meta property="og:image" content="https://heyyanshuman.com/posts/assets/gemv_kernel/image1-v2.png">
 <meta property="og:site_name" content="Anshuman Mishra">
 <meta property="og:image:alt" content="A hand-drawn GEMV overview showing an M by N matrix A multiplied by a length-N vector x to produce a length-M vector y.">
 <meta property="og:image:height" content="819">
 <meta property="og:image:width" content="1920">
 <meta name="twitter:title" content="Making GEMV Fast – Anshuman Mishra">
-<meta name="twitter:description" content="A worklog on optimizing a CUDA GEMV kernel—from arithmetic intensity and uncoalesced loads to a warp-per-row implementation that makes every byte count.">
+<meta name="twitter:description" content="A worklog on optimizing Matrix Vector Multiplication kernel in CUDA">
 <meta name="twitter:image" content="https://heyyanshuman.com/posts/assets/gemv_kernel/image1-v2.png">
 <meta name="twitter:creator" content="@athleticKoder">
 <meta name="twitter:card" content="summary">
@@ -199,7 +199,7 @@ window.Quarto = {
 
 <div>
   <div class="description">
-    A worklog on optimizing a CUDA GEMV kernel—from arithmetic intensity and uncoalesced loads to a warp-per-row implementation that makes every byte count.
+    A worklog on optimizing Matrix Vector Multiplication kernel in CUDA
   </div>
 </div>
 
