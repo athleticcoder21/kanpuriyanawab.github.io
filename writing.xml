@@ -13,7 +13,7 @@
 <lastBuildDate>Thu, 10 Sep 2026 00:00:00 GMT</lastBuildDate>
 <item>
   <title>Making GEMV Fast</title>
-  <link>https://heyyanshuman.com/posts/performant_gemv_kernel.html</link>
+  <link>https://heyyanshuman.com/posts/making_gemv_fast.html</link>
   <description><![CDATA[ 
 
 
@@ -871,7 +871,7 @@ font-style: inherit;">}</span></span></code></pre></div>
  ]]></description>
   <category>LLMs</category>
   <category>Performance Optimization</category>
-  <guid>https://heyyanshuman.com/posts/performant_gemv_kernel.html</guid>
+  <guid>https://heyyanshuman.com/posts/making_gemv_fast.html</guid>
   <pubDate>Thu, 10 Sep 2026 00:00:00 GMT</pubDate>
 </item>
 <item>

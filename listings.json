@@ -2,7 +2,7 @@
   {
     "listing": "/writing.html",
     "items": [
-      "/posts/performant_gemv_kernel.html",
+      "/posts/making_gemv_fast.html",
       "/posts/rlvr.html",
       "/notes/thinking_out_loud.html",
       "/posts/building_ai_environments_with_verifiers.html",
