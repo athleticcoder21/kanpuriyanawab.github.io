@@ -1,5 +1,5 @@
 ---
-title: "Writing a Performant Matrix-Vector Multiplication Kernel"
+title: "Making GEMV Fast"
 aliases:
 - /performant-gemv-kernel
 permalink: /performant-gemv-kernel
@@ -9,12 +9,14 @@ categories:
 - LLMs
 - Performance Optimization
 date: '2026-09-10'
-description: How to write a badass kernel for GEMV?
+description: A worklog on optimizing a CUDA GEMV kernel—from arithmetic intensity and uncoalesced loads to a warp-per-row implementation that makes every byte count.
 hide: false
 output-file: performant_gemv_kernel.html
 search_exclude: false
 
 ---
+
+Code: https://github.com/athleticcoder21/kernels
 
 GEMV means GEneral Matrix Vector multiplication. Which is nothing but muliplication of a matrix with a Vector. 
 
@@ -24,7 +26,7 @@ Formally our goal is to compute:
 
 $$\mathbf{y}_{M \times 1} = \mathbf{A}_{M \times N} \cdot \mathbf{x}_{N \times 1}$$
 
-![](./assets/gemv_kernel/image1.png)
+![](./assets/gemv_kernel/image1-v2.png){fig-alt="A hand-drawn GEMV overview showing an M by N matrix A multiplied by a length-N vector x to produce a length-M vector y."}
 
 ## Arithmetic intensity
 
@@ -584,3 +586,48 @@ for dramatically better use of global-memory bandwidth—which is exactly the
 trade a memory-bound kernel wants us to make.
 
 :::
+
+## Main takeaways
+
+Alright, that was a lot for a matrix - vector multiplication. We started with
+what looked like an obviously parallel algorithm, found out that it was still
+slow, went all the way down to memory transactions, and then rearranged the
+work until the GPU finally got the access pattern it wanted.
+
+If I had to compress the entire worklog into a few points, these would be the
+ones:
+
+- **FLOPs are only half the story.** GEMV has an $AI$ of roughly $0.5$
+  FLOPs/byte. That is already pretty low. The GPU is going to spend more time
+  waiting for matrix values than multiplying them, so staring only at compute
+  throughput tells us almost nothing useful here.
+
+- **Throwing more threads at something does not automatically make it fast.**
+  Our first kernel was massively parallel, but every warp was jumping between
+  rows in memory. We had plenty of threads doing work; we were just feeding
+  those threads horribly.
+
+- **Do not look at one thread and declare the access contiguous.** Thread 0
+  really was walking through its row one element at a time. The catch was that
+  the other 31 threads in its warp were walking through 31 completely different
+  rows. What matters is what the whole warp requests at the same instant.
+
+- **Sometimes the real optimization is simply changing who owns the work.** We
+  went from “one thread owns one row” to “one warp owns one row.” That one
+  change turned addresses separated by $N$ elements into adjacent addresses.
+  Same matrix, same multiplication—much better memory behaviour.
+
+- **Coalescing did not magically improve GEMV's theoretical $AI$.** The best
+  case is still around $0.5$ FLOPs/byte. What coalescing did was stop the bad
+  access pattern from dragging the effective $AI$ towards $0.0625$
+  FLOPs/byte. We did not create more bandwidth; we stopped wasting the
+  bandwidth we already had.
+
+- **Doing a little extra work can save a ridiculous amount of time.** The new
+  kernel needs five shuffle-and-add steps to combine the partial sums. That
+  sounds like overhead—and it is—but it is tiny compared with repeatedly
+  fetching memory chunks from which we use only one float.
+
+And that is really the lesson here. For a memory-bound kernel, the clever part
+is not always reducing the number of FLOPs. Sometimes it is just making sure
+that every expensive byte brought from memory actually gets used.
