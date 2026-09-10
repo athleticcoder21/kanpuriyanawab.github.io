@@ -8,7 +8,11 @@ page-layout: full
 
 I build AI systems for a living and tinker with them for fun.
 
-I lead evals at **Zomato**. What started as a bunch of scripts I wrote to solve my own eval problems turned into **Gavel** — an internal platform I pitched to the VP, got approved, and now serves both AI teams and ops teams across the company. Before Zomato, I consulted with **Google** on KerasHub, integrating model families like Qwen and Mixtral into the framework, and worked with **Weights & Biases**.
+At **Zomato**, I work on evals, post-training, and the infrastructure around both. What started as a bunch of scripts I wrote to solve my own eval problems turned into [**Gavel**](https://www.zomato.com/blog/building-gavel-ai-evaluation-infrastructure-across-eternal/) - an internal platform I pitched to the VP, got approved, and now serves both AI teams and ops teams across the company.
+
+These days, we are building in-house infrastructure in JAX to post-train small models for real production problems. I am betting pretty heavily on a simple idea: with the right data, evals, and systems work, small models can do far more than we give them credit for - and often replace models that are much bigger and much more expensive. 
+
+Before Zomato, I consulted with **Google** on KerasHub, integrating model families like Qwen and Mixtral into the framework, and worked with **Weights & Biases**.
 
 I got into ML through open source. My first PR was a small fix to DeepMind's Optax library — I didn't really know what I was doing. That led to a Google Summer of Code with TensorFlow, where I ended up shipping GPT-NeoX and Llama 2 for KerasNLP, and eventually co-authoring a [paper in JMLR](http://jmlr.org/papers/v25/24-0404.html). Somewhere along the way, Google made me a **Developer Expert in Machine Learning**.
 
