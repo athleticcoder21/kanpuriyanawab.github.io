@@ -7,9 +7,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
 
 <meta name="dcterms.date" content="2026-09-10">
-<meta name="description" content="How to write a badass kernel for GEMV?">
+<meta name="description" content="A worklog on optimizing a CUDA GEMV kernel—from arithmetic intensity and uncoalesced loads to a warp-per-row implementation that makes every byte count.">
 
-<title>Writing a Performant Matrix-Vector Multiplication Kernel – Anshuman Mishra</title>
+<title>Making GEMV Fast – Anshuman Mishra</title>
 <style>
 code{white-space: pre-wrap;}
 span.smallcaps{font-variant: small-caps;}
@@ -129,19 +129,21 @@ window.Quarto = {
 </script>
 
 <link rel="stylesheet" href="../site.css">
-<meta property="og:title" content="Writing a Performant Matrix-Vector Multiplication Kernel – Anshuman Mishra">
-<meta property="og:description" content="How to write a badass kernel for GEMV?">
-<meta property="og:image" content="https://heyyanshuman.com/posts/assets/gemv_kernel/image1.png">
+<meta property="og:title" content="Making GEMV Fast – Anshuman Mishra">
+<meta property="og:description" content="A worklog on optimizing a CUDA GEMV kernel—from arithmetic intensity and uncoalesced loads to a warp-per-row implementation that makes every byte count.">
+<meta property="og:image" content="https://heyyanshuman.com/posts/assets/gemv_kernel/image1-v2.png">
 <meta property="og:site_name" content="Anshuman Mishra">
-<meta property="og:image:height" content="854">
-<meta property="og:image:width" content="1580">
-<meta name="twitter:title" content="Writing a Performant Matrix-Vector Multiplication Kernel – Anshuman Mishra">
-<meta name="twitter:description" content="How to write a badass kernel for GEMV?">
-<meta name="twitter:image" content="https://heyyanshuman.com/posts/assets/gemv_kernel/image1.png">
+<meta property="og:image:alt" content="A hand-drawn GEMV overview showing an M by N matrix A multiplied by a length-N vector x to produce a length-M vector y.">
+<meta property="og:image:height" content="819">
+<meta property="og:image:width" content="1920">
+<meta name="twitter:title" content="Making GEMV Fast – Anshuman Mishra">
+<meta name="twitter:description" content="A worklog on optimizing a CUDA GEMV kernel—from arithmetic intensity and uncoalesced loads to a warp-per-row implementation that makes every byte count.">
+<meta name="twitter:image" content="https://heyyanshuman.com/posts/assets/gemv_kernel/image1-v2.png">
 <meta name="twitter:creator" content="@athleticKoder">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:image-height" content="854">
-<meta name="twitter:image-width" content="1580">
+<meta name="twitter:image:alt" content="A hand-drawn GEMV overview showing an M by N matrix A multiplied by a length-N vector x to produce a length-M vector y.">
+<meta name="twitter:image-height" content="819">
+<meta name="twitter:image-width" content="1920">
 </head>
 
 <body class="quarto-light">
@@ -165,6 +167,7 @@ window.Quarto = {
   <li><a href="#what-access-pattern-do-we-actually-want" id="toc-what-access-pattern-do-we-actually-want" class="nav-link" data-scroll-target="#what-access-pattern-do-we-actually-want">What access pattern do we actually want?</a></li>
   <li><a href="#turning-that-access-pattern-into-code" id="toc-turning-that-access-pattern-into-code" class="nav-link" data-scroll-target="#turning-that-access-pattern-into-code">Turning that access pattern into code</a></li>
   </ul></li>
+  <li><a href="#main-takeaways" id="toc-main-takeaways" class="nav-link" data-scroll-target="#main-takeaways">Main takeaways</a></li>
   </ul>
 </nav>
     </div>
@@ -187,7 +190,7 @@ window.Quarto = {
 
 <header id="title-block-header" class="quarto-title-block default">
 <div class="quarto-title">
-<h1 class="title">Writing a Performant Matrix-Vector Multiplication Kernel</h1>
+<h1 class="title">Making GEMV Fast</h1>
   <div class="quarto-categories">
     <div class="quarto-category">LLMs</div>
     <div class="quarto-category">Performance Optimization</div>
@@ -196,7 +199,7 @@ window.Quarto = {
 
 <div>
   <div class="description">
-    How to write a badass kernel for GEMV?
+    A worklog on optimizing a CUDA GEMV kernel—from arithmetic intensity and uncoalesced loads to a warp-per-row implementation that makes every byte count.
   </div>
 </div>
 
@@ -219,11 +222,12 @@ window.Quarto = {
 </header>
 
 
+<p>Code: https://github.com/athleticcoder21/kernels</p>
 <p>GEMV means GEneral Matrix Vector multiplication. Which is nothing but muliplication of a matrix with a Vector.</p>
 <p>In this worklog, we start from a naive kernel. Once we have done that we study this naive kernel and understand why it is not a performant one. By identifying the bottlenecks, we move on to implement a performant kernel that addresses all the concerns.</p>
 <p>Formally our goal is to compute:</p>
 <p><span class="math display">\[\mathbf{y}_{M \times 1} = \mathbf{A}_{M \times N} \cdot \mathbf{x}_{N \times 1}\]</span></p>
-<p><img src="./assets/gemv_kernel/image1.png" class="img-fluid"></p>
+<p><img src="./assets/gemv_kernel/image1-v2.png" class="img-fluid" alt="A hand-drawn GEMV overview showing an M by N matrix A multiplied by a length-N vector x to produce a length-M vector y."></p>
 <section id="arithmetic-intensity" class="level2">
 <h2 class="anchored" data-anchor-id="arithmetic-intensity">Arithmetic intensity</h2>
 <p>Assume that all operands use FP32, so each element occupies 4 bytes. We also assume ideal memory behavior: the input vector <span class="math inline">\(\mathbf{x}\)</span> is loaded once and retained in cache, while every element of <span class="math inline">\(\mathbf{A}\)</span> is read exactly once.</p>
@@ -608,9 +612,23 @@ offset  1 -&gt;  2 groups become 1 group of 32</code></pre>
 <p>The naive kernel did not need this reduction, so yes, we have introduced some extra work. But for a row containing thousands of values, five register-level shuffle-and-add steps are a tiny price to pay for replacing scattered matrix loads with contiguous ones. We traded a little communication inside the warp for dramatically better use of global-memory bandwidth—which is exactly the trade a memory-bound kernel wants us to make.</p>
 </div>
 </div>
-
-
 </section>
+</section>
+<section id="main-takeaways" class="level2">
+<h2 class="anchored" data-anchor-id="main-takeaways">Main takeaways</h2>
+<p>Alright, that was a lot for a matrix - vector multiplication. We started with what looked like an obviously parallel algorithm, found out that it was still slow, went all the way down to memory transactions, and then rearranged the work until the GPU finally got the access pattern it wanted.</p>
+<p>If I had to compress the entire worklog into a few points, these would be the ones:</p>
+<ul>
+<li><p><strong>FLOPs are only half the story.</strong> GEMV has an <span class="math inline">\(AI\)</span> of roughly <span class="math inline">\(0.5\)</span> FLOPs/byte. That is already pretty low. The GPU is going to spend more time waiting for matrix values than multiplying them, so staring only at compute throughput tells us almost nothing useful here.</p></li>
+<li><p><strong>Throwing more threads at something does not automatically make it fast.</strong> Our first kernel was massively parallel, but every warp was jumping between rows in memory. We had plenty of threads doing work; we were just feeding those threads horribly.</p></li>
+<li><p><strong>Do not look at one thread and declare the access contiguous.</strong> Thread 0 really was walking through its row one element at a time. The catch was that the other 31 threads in its warp were walking through 31 completely different rows. What matters is what the whole warp requests at the same instant.</p></li>
+<li><p><strong>Sometimes the real optimization is simply changing who owns the work.</strong> We went from “one thread owns one row” to “one warp owns one row.” That one change turned addresses separated by <span class="math inline">\(N\)</span> elements into adjacent addresses. Same matrix, same multiplication—much better memory behaviour.</p></li>
+<li><p><strong>Coalescing did not magically improve GEMV’s theoretical <span class="math inline">\(AI\)</span>.</strong> The best case is still around <span class="math inline">\(0.5\)</span> FLOPs/byte. What coalescing did was stop the bad access pattern from dragging the effective <span class="math inline">\(AI\)</span> towards <span class="math inline">\(0.0625\)</span> FLOPs/byte. We did not create more bandwidth; we stopped wasting the bandwidth we already had.</p></li>
+<li><p><strong>Doing a little extra work can save a ridiculous amount of time.</strong> The new kernel needs five shuffle-and-add steps to combine the partial sums. That sounds like overhead—and it is—but it is tiny compared with repeatedly fetching memory chunks from which we use only one float.</p></li>
+</ul>
+<p>And that is really the lesson here. For a memory-bound kernel, the clever part is not always reducing the number of FLOPs. Sometimes it is just making sure that every expensive byte brought from memory actually gets used.</p>
+
+
 </section>
 
 </main> <!-- /main -->
