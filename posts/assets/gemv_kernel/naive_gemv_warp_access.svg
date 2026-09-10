@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="820" viewBox="0 0 1440 820" role="img" aria-labelledby="title desc">
+  <title id="title">Why the naive GEMV matrix loads are not coalesced</title>
+  <desc id="desc">A single thread reads adjacent matrix values over time, but at one loop iteration neighboring lanes in a warp read values N floats apart. The strided warp access requires many more 32-byte memory sectors than a contiguous access.</desc>
+  <defs>
+    <marker id="blue-arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0 0L9 4.5 0 9z" fill="#2563eb"/></marker>
+    <marker id="orange-arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0 0L9 4.5 0 9z" fill="#c2410c"/></marker>
+    <style>.h{font:700 30px system-ui,sans-serif;fill:#102a43}.l{font:700 20px system-ui,sans-serif;fill:#102a43}.s{font:400 16px system-ui,sans-serif;fill:#52606d}.c{font:600 16px system-ui,sans-serif;fill:#102a43;text-anchor:middle}.i{font:500 14px system-ui,sans-serif;fill:#486581;text-anchor:middle}.good{font:700 18px system-ui,sans-serif;fill:#166534}.bad{font:700 18px system-ui,sans-serif;fill:#9a3412}.eq{font:600 18px ui-monospace,SFMono-Regular,Menlo,monospace;fill:#102a43}</style>
+  </defs>
+  <rect width="1440" height="820" fill="#fbfdff"/>
+  <text x="70" y="58" class="h">Coalescing is measured across a warp, at one instruction</text>
+  <text x="70" y="89" class="s">The same matrix loop looks contiguous from one thread’s perspective and strided from the warp’s perspective.</text>
+
+  <rect x="70" y="130" width="620" height="285" rx="14" fill="#eff6ff" stroke="#bfdbfe" stroke-width="2"/>
+  <text x="100" y="170" class="l">One thread over successive loop iterations</text>
+  <text x="100" y="198" class="s">Thread 0 walks across row 0, so its own loads are adjacent over time.</text>
+  <g fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"><rect x="105" y="245" width="90" height="70"/><rect x="195" y="245" width="90" height="70"/><rect x="285" y="245" width="90" height="70"/><rect x="375" y="245" width="90" height="70"/><rect x="465" y="245" width="90" height="70"/><rect x="555" y="245" width="90" height="70"/></g>
+  <g class="c"><text x="150" y="287">A[0,0]</text><text x="240" y="287">A[0,1]</text><text x="330" y="287">A[0,2]</text><text x="420" y="287">A[0,3]</text><text x="510" y="287">…</text><text x="600" y="287">A[0,N−1]</text></g>
+  <path d="M115 345H630" stroke="#2563eb" stroke-width="3" marker-end="url(#blue-arrow)"/>
+  <text x="372" y="380" class="good" text-anchor="middle">contiguous for this thread over time</text>
+
+  <rect x="750" y="130" width="620" height="285" rx="14" fill="#fff7ed" stroke="#fed7aa" stroke-width="2"/>
+  <text x="780" y="170" class="l">One warp during the same loop iteration</text>
+  <text x="780" y="198" class="s">At column c, neighboring lanes own neighboring rows—not columns.</text>
+  <g class="c"><text x="815" y="250">lane 0</text><text x="925" y="250">lane 1</text><text x="1035" y="250">lane 2</text><text x="1145" y="250">lane 3</text><text x="1240" y="250">…</text><text x="1320" y="250">lane 31</text></g>
+  <g fill="#ffedd5" stroke="#ea580c" stroke-width="1.5"><rect x="775" y="275" width="80" height="62"/><rect x="885" y="275" width="80" height="62"/><rect x="995" y="275" width="80" height="62"/><rect x="1105" y="275" width="80" height="62"/><rect x="1280" y="275" width="80" height="62"/></g>
+  <g class="c"><text x="815" y="312">A[0,c]</text><text x="925" y="312">A[1,c]</text><text x="1035" y="312">A[2,c]</text><text x="1145" y="312">A[3,c]</text><text x="1240" y="312">…</text><text x="1320" y="312">A[31,c]</text></g>
+  <g class="i"><text x="815" y="364">c</text><text x="925" y="364">c + N</text><text x="1035" y="364">c + 2N</text><text x="1145" y="364">c + 3N</text><text x="1240" y="364">…</text><text x="1320" y="364">c + 31N</text></g>
+  <text x="1070" y="395" class="bad" text-anchor="middle">stride N across the warp at this instant</text>
+
+  <text x="70" y="475" class="l">What the memory system sees for one FP32 load per lane</text>
+  <text x="70" y="505" class="s">Illustrative compute capability ≥ 6.0 model using 32-byte memory sectors.</text>
+
+  <text x="90" y="555" class="good">Contiguous warp access</text>
+  <text x="90" y="583" class="eq">0, 1, 2, 3, …, 31</text>
+  <g stroke="#15803d" stroke-width="1.5" fill="#dcfce7"><rect x="410" y="535" width="135" height="62"/><rect x="545" y="535" width="135" height="62"/><rect x="680" y="535" width="135" height="62"/><rect x="815" y="535" width="135" height="62"/></g>
+  <g class="c"><text x="477" y="573">32 B sector</text><text x="612" y="573">32 B sector</text><text x="747" y="573">32 B sector</text><text x="882" y="573">32 B sector</text></g>
+  <text x="1010" y="558" class="good">4 transactions</text><text x="1010" y="585" class="s">128 B useful / 128 B moved ≈ 100%</text>
+
+  <text x="90" y="660" class="bad">Naïve GEMV warp access</text>
+  <text x="90" y="688" class="eq">c, c+N, c+2N, …</text>
+  <g stroke="#c2410c" stroke-width="1.5" fill="#ffedd5"><rect x="410" y="640" width="62" height="62"/><rect x="493" y="640" width="62" height="62"/><rect x="576" y="640" width="62" height="62"/><rect x="659" y="640" width="62" height="62"/><rect x="742" y="640" width="62" height="62"/><rect x="825" y="640" width="62" height="62"/><rect x="908" y="640" width="62" height="62"/></g>
+  <g class="i"><text x="441" y="677">32 B</text><text x="524" y="677">32 B</text><text x="607" y="677">32 B</text><text x="690" y="677">32 B</text><text x="773" y="677">…</text><text x="856" y="677">32 B</text><text x="939" y="677">32 B</text></g>
+  <text x="1010" y="663" class="bad">up to 32 transactions</text><text x="1010" y="690" class="s">128 B useful / 1024 B moved = 12.5%</text>
+
+  <rect x="70" y="742" width="1300" height="52" rx="12" fill="#eef2ff" stroke="#c7d2fe"/>
+  <text x="720" y="775" class="l" text-anchor="middle">The problem is not each thread’s stride through time; it is the warp’s stride at one instruction.</text>
+</svg>

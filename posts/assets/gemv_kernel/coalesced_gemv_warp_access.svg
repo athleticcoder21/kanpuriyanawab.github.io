@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="760" viewBox="0 0 1400 760" role="img" aria-labelledby="title desc">
+  <title id="title">Coalesced warp access for GEMV</title>
+  <desc id="desc">All 32 threads cooperate on one matrix row. At each iteration neighboring threads access neighboring columns, producing consecutive linear addresses that fit into four 32-byte memory sectors.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0 0L9 4.5 0 9z" fill="#0f766e"/></marker>
+    <style>.h{font:700 30px system-ui,sans-serif;fill:#102a43}.l{font:700 20px system-ui,sans-serif;fill:#102a43}.s{font:400 16px system-ui,sans-serif;fill:#52606d}.c{font:600 16px system-ui,sans-serif;fill:#102a43;text-anchor:middle}.i{font:500 14px system-ui,sans-serif;fill:#486581;text-anchor:middle}.good{font:700 19px system-ui,sans-serif;fill:#047857;text-anchor:middle}.eq{font:600 18px ui-monospace,SFMono-Regular,Menlo,monospace;fill:#102a43;text-anchor:middle}</style>
+  </defs>
+  <rect width="1400" height="760" fill="#fbfdff"/>
+  <text x="70" y="58" class="h">One warp walks across one row together</text>
+  <text x="70" y="89" class="s">Each thread skips by 32 over time, but the warp still requests 32 adjacent values during every pass.</text>
+
+  <text x="70" y="150" class="l">First pass through the loop</text><text x="340" y="150" class="eq">column = threadIdx.x</text>
+  <g fill="#dbeafe" stroke="#2563eb" stroke-width="1.6"><rect x="70" y="180" width="120" height="75"/><rect x="190" y="180" width="120" height="75"/><rect x="310" y="180" width="120" height="75"/><rect x="430" y="180" width="120" height="75"/><rect x="550" y="180" width="120" height="75"/><rect x="670" y="180" width="120" height="75"/><rect x="790" y="180" width="120" height="75"/><rect x="910" y="180" width="120" height="75"/><rect x="1030" y="180" width="120" height="75"/><rect x="1150" y="180" width="180" height="75"/></g>
+  <g class="c"><text x="130" y="225">A[row,0]</text><text x="250" y="225">A[row,1]</text><text x="370" y="225">A[row,2]</text><text x="490" y="225">A[row,3]</text><text x="610" y="225">A[row,4]</text><text x="730" y="225">…</text><text x="850" y="225">A[row,29]</text><text x="970" y="225">A[row,30]</text><text x="1090" y="225">A[row,31]</text><text x="1240" y="225">next values…</text></g>
+  <g class="i"><text x="130" y="280">thread 0</text><text x="250" y="280">thread 1</text><text x="370" y="280">thread 2</text><text x="490" y="280">thread 3</text><text x="610" y="280">thread 4</text><text x="730" y="280">…</text><text x="850" y="280">thread 29</text><text x="970" y="280">thread 30</text><text x="1090" y="280">thread 31</text></g>
+  <path d="M85 315H1135" stroke="#0f766e" stroke-width="3" marker-end="url(#arrow)"/><text x="610" y="345" class="good">linear indices: row×N, row×N+1, …, row×N+31</text>
+
+  <text x="70" y="405" class="l">Second pass through the loop</text><text x="360" y="405" class="eq">column = 32 + threadIdx.x</text>
+  <g fill="#dcfce7" stroke="#16a34a" stroke-width="1.6"><rect x="70" y="435" width="120" height="75"/><rect x="190" y="435" width="120" height="75"/><rect x="310" y="435" width="120" height="75"/><rect x="430" y="435" width="120" height="75"/><rect x="550" y="435" width="120" height="75"/><rect x="670" y="435" width="120" height="75"/><rect x="790" y="435" width="120" height="75"/><rect x="910" y="435" width="120" height="75"/><rect x="1030" y="435" width="120" height="75"/><rect x="1150" y="435" width="180" height="75"/></g>
+  <g class="c"><text x="130" y="480">A[row,32]</text><text x="250" y="480">A[row,33]</text><text x="370" y="480">A[row,34]</text><text x="490" y="480">A[row,35]</text><text x="610" y="480">A[row,36]</text><text x="730" y="480">…</text><text x="850" y="480">A[row,61]</text><text x="970" y="480">A[row,62]</text><text x="1090" y="480">A[row,63]</text><text x="1240" y="480">next values…</text></g>
+  <g class="i"><text x="130" y="535">thread 0</text><text x="250" y="535">thread 1</text><text x="370" y="535">thread 2</text><text x="490" y="535">thread 3</text><text x="610" y="535">thread 4</text><text x="730" y="535">…</text><text x="850" y="535">thread 29</text><text x="970" y="535">thread 30</text><text x="1090" y="535">thread 31</text></g>
+  <path d="M85 570H1135" stroke="#0f766e" stroke-width="3" marker-end="url(#arrow)"/><text x="610" y="600" class="good">linear indices: row×N+32, row×N+33, …, row×N+63</text>
+
+  <text x="70" y="660" class="l">One FP32 warp load</text>
+  <g fill="#ccfbf1" stroke="#0f766e" stroke-width="1.6"><rect x="330" y="628" width="175" height="62"/><rect x="505" y="628" width="175" height="62"/><rect x="680" y="628" width="175" height="62"/><rect x="855" y="628" width="175" height="62"/></g>
+  <g class="c"><text x="417" y="666">32-byte sector</text><text x="592" y="666">32-byte sector</text><text x="767" y="666">32-byte sector</text><text x="942" y="666">32-byte sector</text></g>
+  <text x="1180" y="653" class="good">128 useful bytes</text><text x="1180" y="681" class="good">128 transferred bytes</text>
+  <rect x="70" y="710" width="1260" height="40" rx="10" fill="#ecfdf5" stroke="#a7f3d0"/><text x="700" y="737" class="good">Across neighboring threads: Δaddress = 1 element → coalesced access</text>
+</svg>
