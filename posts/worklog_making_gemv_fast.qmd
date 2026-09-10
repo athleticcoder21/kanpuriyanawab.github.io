@@ -9,7 +9,7 @@ categories:
 - LLMs
 - Performance Optimization
 date: '2026-09-10'
-description: A worklog on optimizing a CUDA GEMV kernel—from arithmetic intensity and uncoalesced loads to a warp-per-row implementation that makes every byte count.
+description: A worklog on optimizing Matrix Vector Multiplication kernel in CUDA
 hide: false
 output-file: making_gemv_fast.html
 search_exclude: false
