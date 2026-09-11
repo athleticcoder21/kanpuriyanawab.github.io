@@ -20,7 +20,7 @@
 
 
 
-<p>Code: <a href="https://github.com/athleticcoder21/kernels">https://github.com/athleticcoder21/kernels</a></p>
+<p>Code: <a href="https://github.com/athleticcoder21/inference-book/kernels/gemv">https://github.com/athleticcoder21/inference-book/kernels/gemv</a></p>
 <p>GEMV means GEneral Matrix Vector multiplication. Which is nothing but muliplication of a matrix with a Vector.</p>
 <p>In this worklog, we start from a naive kernel. Once we have done that we study this naive kernel and understand why it is not a performant one. By identifying the bottlenecks, we move on to implement a performant kernel that addresses all the concerns.</p>
 <p>Formally our goal is to compute:</p>

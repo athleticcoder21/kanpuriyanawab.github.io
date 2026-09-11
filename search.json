@@ -18,7 +18,7 @@
     "href": "posts/making_gemv_fast.html",
     "title": "Making GEMV Fast",
     "section": "",
-    "text": "am.\n  \n    Writing\n    Work\n    Projects\n    Talks\nCode: https://github.com/athleticcoder21/kernels\nGEMV means GEneral Matrix Vector multiplication. Which is nothing but muliplication of a matrix with a Vector.\nIn this worklog, we start from a naive kernel. Once we have done that we study this naive kernel and understand why it is not a performant one. By identifying the bottlenecks, we move on to implement a performant kernel that addresses all the concerns.\nFormally our goal is to compute:\n\\[\\mathbf{y}_{M \\times 1} = \\mathbf{A}_{M \\times N} \\cdot \\mathbf{x}_{N \\times 1}\\]"
+    "text": "am.\n  \n    Writing\n    Work\n    Projects\n    Talks\nCode: https://github.com/athleticcoder21/inference-book/kernels/gemv\nGEMV means GEneral Matrix Vector multiplication. Which is nothing but muliplication of a matrix with a Vector.\nIn this worklog, we start from a naive kernel. Once we have done that we study this naive kernel and understand why it is not a performant one. By identifying the bottlenecks, we move on to implement a performant kernel that addresses all the concerns.\nFormally our goal is to compute:\n\\[\\mathbf{y}_{M \\times 1} = \\mathbf{A}_{M \\times N} \\cdot \\mathbf{x}_{N \\times 1}\\]"
   },
   {
     "objectID": "posts/making_gemv_fast.html#arithmetic-intensity",
