@@ -10,7 +10,1318 @@
 <atom:link href="https://heyyanshuman.com/writing.xml" rel="self" type="application/rss+xml"/>
 <description>Machine learning engineer building AI systems, open source software, and essays.</description>
 <generator>quarto-1.7.31</generator>
-<lastBuildDate>Thu, 10 Sep 2026 00:00:00 GMT</lastBuildDate>
+<lastBuildDate>Fri, 11 Sep 2026 00:00:00 GMT</lastBuildDate>
+<item>
+  <title>Making Softmax Fast</title>
+  <link>https://heyyanshuman.com/posts/making_softmax_fast.html</link>
+  <description><![CDATA[ 
+
+
+
+
+
+<p>The code for this chapter lives in <a href="https://github.com/athleticcoder21/inference-book/tree/main/kernels/softmax"><code>kernels/softmax/</code></a>.</p>
+<p>Softmax is a very important part of attention mechanism in transformers. It converts raw attention scores to a probability distribution, where each element in the output is between 0 and 1, and sum of all elements is 1.</p>
+<p>Formally, for an input vector <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7Bx%7D"> containing <img src="https://latex.codecogs.com/png.latex?N"> elements, Softmax is defined as:</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Coperatorname%7Bsoftmax%7D(%5Cmathbf%7Bx%7D)_i%0A%20%20=%20%5Cfrac%7Be%5E%7Bx_i%7D%7D%0A%20%20%20%20%20%20%20%20%20%7B%5Cdisplaystyle%5Csum_%7Bj=0%7D%5E%7BN-1%7D%20e%5E%7Bx_j%7D%7D,%0A%20%20%5Cqquad%20i%20%5Cin%20%5C%7B0,%20%5Cldots,%20N-1%5C%7D.%0A"></p>
+<p><img src="https://heyyanshuman.com/posts/assets/softmax_kernel/softmax-header.png" class="img-fluid" alt="A hand-drawn row of four input scores passing through Softmax to become four nonnegative probabilities whose sum is one."></p>
+<p>Here, <img src="https://latex.codecogs.com/png.latex?x_i"> is the <img src="https://latex.codecogs.com/png.latex?i">-th element of the input and the denominator is the sum of the exponentials of all elements in the vector.</p>
+<p>There is one problem with implementing this equation directly. The exponential function grows very quickly, so a large value of <img src="https://latex.codecogs.com/png.latex?x_i"> can make <img src="https://latex.codecogs.com/png.latex?e%5E%7Bx_i%7D"> overflow. To make the computation numerically stable, we first find the maximum value in the input vector:</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0Am%20=%20%5Cmax_%7B0%20%5Cleq%20j%20%3C%20N%7D%20x_j.%0A"></p>
+<p>We then subtract <img src="https://latex.codecogs.com/png.latex?m"> from every element before taking its exponential:</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Coperatorname%7Bsoftmax%7D(%5Cmathbf%7Bx%7D)_i%0A%20%20=%20%5Cfrac%7Be%5E%7Bx_i-m%7D%7D%0A%20%20%20%20%20%20%20%20%20%7B%5Cdisplaystyle%5Csum_%7Bj=0%7D%5E%7BN-1%7D%20e%5E%7Bx_j-m%7D%7D,%0A%20%20%5Cqquad%20i%20%5Cin%20%5C%7B0,%20%5Cldots,%20N-1%5C%7D.%0A"></p>
+<p>If you notice, subtracting the same value from every element does not change the final probability distribution. But now the largest exponent is <img src="https://latex.codecogs.com/png.latex?e%5E0=1">, which prevents the exponential from overflowing and gives us a numerically stable implementation.</p>
+<section id="one-thread-per-row" class="level2">
+<h2 class="anchored" data-anchor-id="one-thread-per-row">One thread per row</h2>
+<section id="walking-over-one-row" class="level3">
+<h3 class="anchored" data-anchor-id="walking-over-one-row">Walking over one row</h3>
+<p>Assume our input is a matrix <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7BX%5BM,N%5D%7D">, let’s talk about how we write this kernel. Let’s start with the simplest approach. The first thing that might come to mind is to assign one thread to each row. and have it apply Softmax independently to every row i.e.&nbsp;we are really calculating Softmax for <img src="https://latex.codecogs.com/png.latex?M"> different vectors, each containing <img src="https://latex.codecogs.com/png.latex?N"> elements.</p>
+<p>That thread first walks over its row to find the maximum value, walks over it again to calculate the denominator, and then makes one final pass to write the output.</p>
+<pre class="text"><code>parallel for row = 0 to M - 1:
+    maximum = -infinity
+
+    for column = 0 to N - 1:
+        maximum = max(maximum, X[row, column])
+
+    denominator = 0
+
+    for column = 0 to N - 1:
+        denominator += exp(X[row, column] - maximum)
+
+    for column = 0 to N - 1:
+        Y[row, column] = exp(X[row, column] - maximum) / denominator</code></pre>
+<p>Pretty straightforward. Different rows are processed in parallel, but inside each row a single thread still does all the work sequentially. Before we try to improve that, let us understand how much work this algorithm actually performs.</p>
+</section>
+<section id="cost-of-three-passes" class="level3">
+<h3 class="anchored" data-anchor-id="cost-of-three-passes">Cost of three passes</h3>
+<p>Again, assume that the input and output use FP32, so every element occupies 4 bytes. We will also assume that values are read from global memory on every pass.</p>
+<section id="computation" class="level4">
+<h4 class="anchored" data-anchor-id="computation">Computation</h4>
+<p>For one row, finding the maximum requires <img src="https://latex.codecogs.com/png.latex?N-1"> comparisons. Comparisons are not floating-point operations, so we keep them separate from the FLOP count.</p>
+<p>The second pass, which calculates the denominator, performs <img src="https://latex.codecogs.com/png.latex?N"> subtractions and <img src="https://latex.codecogs.com/png.latex?N-1"> additions.</p>
+<p>The third pass performs another <img src="https://latex.codecogs.com/png.latex?N"> subtractions and <img src="https://latex.codecogs.com/png.latex?N"> divisions. Therefore, excluding the exponential function for a moment, the ordinary floating-point work for one row is</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0AN+(N-1)+N+N%20=%204N-1%20%5Cquad%20%5Ctext%7BFLOPs%7D.%0A"></p>
+<p>Across all <img src="https://latex.codecogs.com/png.latex?M"> rows, this becomes</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0AM(4N-1)%20=%204MN-M%20%5Cquad%20%5Ctext%7BFLOPs%7D.%0A"></p>
+<p>We also evaluate the exponential twice for every element, giving us <img src="https://latex.codecogs.com/png.latex?2MN"> exponential evaluations. An exponential is not a single FLOP. It is a special function whose cost and throughput depend on the hardware, so folding it into the FLOP count would make the number look more precise than it really is.</p>
+</section>
+<section id="memory-access" class="level4">
+<h4 class="anchored" data-anchor-id="memory-access">Memory access</h4>
+<p>The naive algorithm makes three complete passes over <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7BX%7D"> and one pass to write <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7BY%7D">:</p>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th>Operation</th>
+<th style="text-align: right;">Elements transferred</th>
+<th style="text-align: right;">Bytes transferred</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Read <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7BX%7D"> to find the maximum</td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?MN"></td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?4MN"></td>
+</tr>
+<tr class="even">
+<td>Read <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7BX%7D"> to calculate the denominator</td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?MN"></td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?4MN"></td>
+</tr>
+<tr class="odd">
+<td>Read <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7BX%7D"> to calculate the output</td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?MN"></td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?4MN"></td>
+</tr>
+<tr class="even">
+<td>Write <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7BY%7D"></td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?MN"></td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?4MN"></td>
+</tr>
+<tr class="odd">
+<td><strong>Total</strong></td>
+<td style="text-align: right;"><strong><img src="https://latex.codecogs.com/png.latex?4MN"></strong></td>
+<td style="text-align: right;"><strong><img src="https://latex.codecogs.com/png.latex?16MN"></strong></td>
+</tr>
+</tbody>
+</table>
+<p>Using only the ordinary floating-point operations, the arithmetic intensity is</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Cbegin%7Baligned%7D%0AAI(M,N)%0A%20%20&amp;=%20%5Cfrac%7BM(4N-1)%7D%7B16MN%7D%20%5C%5C%0A%20%20&amp;=%20%5Cfrac%7B4N-1%7D%7B16N%7D%0A%20%20%20%20%20%5Cquad%20%5Ctext%7BFLOPs/byte%7D.%0A%5Cend%7Baligned%7D%0A"></p>
+<p>For a large <img src="https://latex.codecogs.com/png.latex?N">,</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0AAI(M,N)%20%5Capprox%20%5Cfrac%7B4N%7D%7B16N%7D%0A%20%20%20%20%20%20%20%20=%20%5Cfrac%7B1%7D%7B4%7D%0A%20%20%20%20%20%20%20%20=%200.25%20%5Cquad%20%5Ctext%7BFLOPs/byte%7D.%0A"></p>
+<p>So even before looking at how much parallelism we use, this is already a low-arithmetic-intensity algorithm. It performs roughly one ordinary floating-point operation for every 4 bytes transferred. The exponential evaluations certainly add computation, but they do not remove the three full reads of the input.</p>
+<div class="callout callout-style-default callout-note callout-titled" title="Why are exponentials not included in the FLOP count?">
+<div class="callout-header d-flex align-content-center" data-bs-toggle="collapse" data-bs-target=".callout-1-contents" aria-controls="callout-1" aria-expanded="false" aria-label="Toggle callout">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+Why are exponentials not included in the FLOP count?
+</div>
+<div class="callout-btn-toggle d-inline-block border-0 py-1 ps-1 pe-0 float-end"><i class="callout-toggle"></i></div>
+</div>
+<div id="callout-1" class="callout-1-contents callout-collapse collapse">
+<div class="callout-body-container callout-body">
+<p>FLOPs traditionally count basic floating-point operations such as addition, subtraction, multiplication, and division. Functions such as <code>exp</code> are implemented using multiple instructions or specialized hardware and can have very different throughput from those basic operations.</p>
+<p>If we use a simplified operation count and pretend that each exponential is one operation, the algorithm performs <img src="https://latex.codecogs.com/png.latex?6MN-M"> operations and has an operation intensity approaching <img src="https://latex.codecogs.com/png.latex?0.375"> operations/byte. That number can be useful for a rough comparison between our own kernels, but it should not be confused with a hardware-independent FLOP count.</p>
+</div>
+</div>
+</div>
+<p>There are two problems hiding inside this simple implementation:</p>
+<ul>
+<li><p><strong>Unnecessary repeated iterations.</strong> We iterate over the same row three times: once to find the maximum, once to calculate the denominator, and once to write the output. Every input element is fetched from global memory three times. We also calculate its exponential in the second pass and then calculate the same exponential again in the third pass.</p></li>
+<li><p><strong>Uncoalesced memory access.</strong> One thread owns one row, so neighboring threads in a warp read from different rows. We already studied this access pattern in the GEMV chapter, so we will not go into it again here. We will come back and fix it later.</p></li>
+</ul>
+</section>
+</section>
+</section>
+<section id="removing-one-pass-over-the-row" class="level2">
+<h2 class="anchored" data-anchor-id="removing-one-pass-over-the-row">Removing one pass over the row</h2>
+<section id="updating-statistics-online" class="level3">
+<h3 class="anchored" data-anchor-id="updating-statistics-online">Updating statistics online</h3>
+<p>Let’s double-click on the first problem and see if it is possible to find the maximum and calculate the denominator in the same pass.</p>
+<p>Our denominator is defined relative to the maximum value of the complete row, but while reading that row from left to right, we do not know the final maximum yet.</p>
+<p>Turns out, we do not need to know it in advance. Bear with me for a moment.</p>
+<p>Assume we have processed the row up to index <img src="https://latex.codecogs.com/png.latex?i">. The largest value we have seen so far is <img src="https://latex.codecogs.com/png.latex?m_1">. Since every exponential must be calculated relative to the maximum, our running denominator is</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0AL_i%0A%20%20=%20e%5E%7Bx_0-m_1%7D%0A%20%20+%20e%5E%7Bx_1-m_1%7D%0A%20%20+%20%5Ccdots%0A%20%20+%20e%5E%7Bx_i-m_1%7D.%0A"></p>
+<p>Now we move to index <img src="https://latex.codecogs.com/png.latex?i+1"> and discover that <img src="https://latex.codecogs.com/png.latex?x_%7Bi+1%7D"> is larger than <img src="https://latex.codecogs.com/png.latex?m_1">. Let us call this new maximum <img src="https://latex.codecogs.com/png.latex?m_2">:</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0Am_2%20=%20x_%7Bi+1%7D,%20%5Cqquad%20m_2%20%3E%20m_1.%0A"></p>
+<p>We have a problem. All the terms already stored in <img src="https://latex.codecogs.com/png.latex?L_i"> were calculated relative to <img src="https://latex.codecogs.com/png.latex?m_1">, but they now need to be relative to <img src="https://latex.codecogs.com/png.latex?m_2">. The corrected sum of the old elements should be</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0Ae%5E%7Bx_0-m_2%7D%0A+%20e%5E%7Bx_1-m_2%7D%0A+%20%5Ccdots%0A+%20e%5E%7Bx_i-m_2%7D.%0A"></p>
+<p>However it is solvable. We can use the multiplication property of exponentials:</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0Ae%5Ea%20e%5Eb%20=%20e%5E%7Ba+b%7D.%0A"></p>
+<p>Multiply the old running sum by <img src="https://latex.codecogs.com/png.latex?e%5E%7Bm_1-m_2%7D">:</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Cbegin%7Baligned%7D%0AL_i%20e%5E%7Bm_1-m_2%7D%0A%20%20&amp;=%20%5Cleft(%0A%20%20%20%20%20%20%20e%5E%7Bx_0-m_1%7D%0A%20%20%20%20%20%20%20+%20e%5E%7Bx_1-m_1%7D%0A%20%20%20%20%20%20%20+%20%5Ccdots%0A%20%20%20%20%20%20%20+%20e%5E%7Bx_i-m_1%7D%0A%20%20%20%20%20%5Cright)e%5E%7Bm_1-m_2%7D%20%5C%5C%0A%20%20&amp;=%20e%5E%7Bx_0-m_1%7De%5E%7Bm_1-m_2%7D%0A%20%20%20%20%20+%20e%5E%7Bx_1-m_1%7De%5E%7Bm_1-m_2%7D%0A%20%20%20%20%20+%20%5Ccdots%0A%20%20%20%20%20+%20e%5E%7Bx_i-m_1%7De%5E%7Bm_1-m_2%7D%20%5C%5C%0A%20%20&amp;=%20e%5E%7Bx_0-m_2%7D%0A%20%20%20%20%20+%20e%5E%7Bx_1-m_2%7D%0A%20%20%20%20%20+%20%5Ccdots%0A%20%20%20%20%20+%20e%5E%7Bx_i-m_2%7D.%0A%5Cend%7Baligned%7D%0A"></p>
+<p><strong>Boom!</strong></p>
+<p>With one multiplication, we corrected the contribution of every element we had already processed. All that remains is to add the contribution of the new maximum itself:</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0Ae%5E%7Bm_2-m_2%7D=e%5E0=1.%0A"></p>
+<p>Therefore, when we encounter a new maximum, the update is simply</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0AL_%7Bi+1%7D%20=%20L_i%20e%5E%7Bm_1-m_2%7D+1.%0A"></p>
+<p>And if <img src="https://latex.codecogs.com/png.latex?x_%7Bi+1%7D"> is not a new maximum, there is nothing to correct. We keep <img src="https://latex.codecogs.com/png.latex?m_1"> and update the sum normally:</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0AL_%7Bi+1%7D=L_i+e%5E%7Bx_%7Bi+1%7D-m_1%7D.%0A"></p>
+<p>That is the entire trick behind <strong>online Softmax</strong>. Instead of waiting until the end to learn the maximum, we update the maximum as we go and rescale the work we have already done whenever that maximum changes.</p>
+<p>That gives us the online algorithm:</p>
+<pre class="text"><code>parallel for row = 0 to M - 1:
+    maximum = -infinity
+    denominator = 0
+
+    for column = 0 to N - 1:
+        current = X[row, column]
+
+        if current &gt; maximum:
+            denominator = denominator * exp(maximum - current) + 1
+            maximum = current
+        else:
+            denominator += exp(current - maximum)
+
+    for column = 0 to N - 1:
+        Y[row, column] = exp(X[row, column] - maximum) / denominator</code></pre>
+<p>We still need the final normalization pass, but the separate maximum and denominator passes have now become one. Our three-pass algorithm is down to two passes.</p>
+</section>
+<section id="cost-of-two-passes" class="level3">
+<h3 class="anchored" data-anchor-id="cost-of-two-passes">Cost of two passes</h3>
+<p>Let’s now analyze what this trick actually does to our algorithm.</p>
+<section id="computation-1" class="level4">
+<h4 class="anchored" data-anchor-id="computation-1">Computation</h4>
+<p>Let <img src="https://latex.codecogs.com/png.latex?R"> be the total number of times an element becomes a new running maximum across all <img src="https://latex.codecogs.com/png.latex?M"> rows. We process <img src="https://latex.codecogs.com/png.latex?MN"> elements in total. Now let us account for the work one operation at a time.</p>
+<ul>
+<li><p>We compare every element with the running maximum. That gives us <img src="https://latex.codecogs.com/png.latex?MN"> comparisons. We keep these separate because comparisons are not FLOPs.</p></li>
+<li><p>Whether the element becomes a new maximum or not, we subtract one value from another to form the exponent. That gives us <img src="https://latex.codecogs.com/png.latex?MN"> subtractions, or <img src="https://latex.codecogs.com/png.latex?MN"> FLOPs.</p></li>
+<li><p>We evaluate one exponential for every element during the first pass. That gives us <img src="https://latex.codecogs.com/png.latex?MN"> exponential evaluations. As before, we track these separately from ordinary FLOPs.</p></li>
+<li><p>We add one contribution to the running denominator for every element. That gives us <img src="https://latex.codecogs.com/png.latex?MN"> additions, or another <img src="https://latex.codecogs.com/png.latex?MN"> FLOPs.</p></li>
+<li><p>Whenever an element becomes the new maximum, we multiply the old denominator by a correction factor. This happens <img src="https://latex.codecogs.com/png.latex?R"> times, giving us <img src="https://latex.codecogs.com/png.latex?R"> multiplications, or <img src="https://latex.codecogs.com/png.latex?R"> FLOPs.</p></li>
+</ul>
+<p>Now we can add the ordinary floating-point work from the first pass:</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Cunderbrace%7BMN%7D_%7B%5Ctext%7Bsubtractions%7D%7D%0A+%20%5Cunderbrace%7BMN%7D_%7B%5Ctext%7Badditions%7D%7D%0A+%20%5Cunderbrace%7BR%7D_%7B%5Ctext%7Brescaling%20multiplications%7D%7D%0A=%202MN+R%20%5Cquad%20%5Ctext%7BFLOPs%7D.%0A"></p>
+<p>We then make the normalization pass over all <img src="https://latex.codecogs.com/png.latex?MN"> elements:</p>
+<ul>
+<li>Subtracting the final maximum contributes <img src="https://latex.codecogs.com/png.latex?MN"> FLOPs.</li>
+<li>Evaluating the exponential contributes another <img src="https://latex.codecogs.com/png.latex?MN"> exponential evaluations.</li>
+<li>Dividing by the denominator contributes <img src="https://latex.codecogs.com/png.latex?MN"> FLOPs.</li>
+</ul>
+<p>So the normalization pass contributes</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Cunderbrace%7BMN%7D_%7B%5Ctext%7Bsubtractions%7D%7D%0A+%20%5Cunderbrace%7BMN%7D_%7B%5Ctext%7Bdivisions%7D%7D%0A=%202MN%20%5Cquad%20%5Ctext%7BFLOPs%7D.%0A"></p>
+<p>Finally, adding both passes together gives us</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Cbegin%7Baligned%7D%0A%5Ctext%7BFLOPs%7D_%7B%5Ctext%7Bonline%7D%7D%0A%20%20&amp;=%20(2MN+R)+2MN%20%5C%5C%0A%20%20&amp;=%204MN+R.%0A%5Cend%7Baligned%7D%0A"></p>
+<p>We also perform <img src="https://latex.codecogs.com/png.latex?MN+MN=2MN"> exponential evaluations in total. So this optimization does not reduce the computational work. It adds <img src="https://latex.codecogs.com/png.latex?R"> rescaling multiplications in exchange for reading the input fewer times.</p>
+</section>
+<section id="memory-access-1" class="level4">
+<h4 class="anchored" data-anchor-id="memory-access-1">Memory access</h4>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 27%">
+<col style="width: 36%">
+<col style="width: 36%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Operation</th>
+<th style="text-align: right;">Elements transferred</th>
+<th style="text-align: right;">Bytes transferred</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Read <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7BX%7D"> to update the maximum and denominator</td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?MN"></td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?4MN"></td>
+</tr>
+<tr class="even">
+<td>Read <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7BX%7D"> to calculate the output</td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?MN"></td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?4MN"></td>
+</tr>
+<tr class="odd">
+<td>Write <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7BY%7D"></td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?MN"></td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?4MN"></td>
+</tr>
+<tr class="even">
+<td><strong>Total</strong></td>
+<td style="text-align: right;"><strong><img src="https://latex.codecogs.com/png.latex?3MN"></strong></td>
+<td style="text-align: right;"><strong><img src="https://latex.codecogs.com/png.latex?12MN"></strong></td>
+</tr>
+</tbody>
+</table>
+<p>We reduced the input reads from <img src="https://latex.codecogs.com/png.latex?3MN"> elements to <img src="https://latex.codecogs.com/png.latex?2MN"> elements. Including the output write, total memory traffic falls from <img src="https://latex.codecogs.com/png.latex?16MN"> bytes to <img src="https://latex.codecogs.com/png.latex?12MN"> bytes</p>
+<p>The arithmetic intensity is now approximately</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Cbegin%7Baligned%7D%0AAI_%7B%5Ctext%7Bonline%7D%7D(M,N)%0A%20%20&amp;%5Capprox%20%5Cfrac%7B4MN+R%7D%7B12MN%7D%20%5C%5C%0A%20%20&amp;=%20%5Cfrac%7B1%7D%7B3%7D+%5Cfrac%7BR%7D%7B12MN%7D%0A%20%20%20%20%20%5Cquad%20%5Ctext%7BFLOPs/byte%7D.%0A%5Cend%7Baligned%7D%0A"></p>
+<p>Usually, only a small fraction of the elements become new running maxima, so <img src="https://latex.codecogs.com/png.latex?R%20%5Cll%20MN">. In that case,</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0AAI_%7B%5Ctext%7Bonline%7D%7D(M,N)%20%5Capprox%20%5Cfrac%7B1%7D%7B3%7D%0A%20%20%5Capprox%200.333%20%5Cquad%20%5Ctext%7BFLOPs/byte%7D.%0A"></p>
+<p>We moved from <img src="https://latex.codecogs.com/png.latex?0.25"> to approximately <img src="https://latex.codecogs.com/png.latex?0.333"> FLOPs/byte. <strong>Note that, this bump did not come from doing fewer FLOPs, we actually do a little more. It came from eliminating one complete read of the input matrix.</strong></p>
+<div class="callout callout-style-default callout-note callout-titled">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+Note
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Note that this bump did not come from doing fewer FLOPs, we actually do a little more. It came from eliminating one complete read of the input matrix.</p>
+</div>
+</div>
+</section>
+</section>
+</section>
+<section id="one-warp-per-row" class="level2">
+<h2 class="anchored" data-anchor-id="one-warp-per-row">One warp per row</h2>
+<section id="splitting-a-row-across-the-warp" class="level3">
+<h3 class="anchored" data-anchor-id="splitting-a-row-across-the-warp">Splitting a row across the warp</h3>
+<p>Alright, that’s one problem down. Let’s see if we can further optimize this kernel by leveraging <strong>coalesced memory access pattern.</strong></p>
+<p>As of now our kernel still assigns one entire row to one thread which is bad because neighboring threads are reading the same column from different rows, so their addresses are <img src="https://latex.codecogs.com/png.latex?N"> elements apart. ( I recommend referring to GEMV kernel optimization chapter to further understand why)</p>
+<p>We have to somehow reimplement this algorithm so that instead of giving one row to one thread, let us give one row to an entire thread block:</p>
+<pre class="text"><code>block 0 -&gt; row 0
+block 1 -&gt; row 1
+block 2 -&gt; row 2
+...</code></pre>
+<p>Let’s assume that one block owns one row. But we still need to decide how the columns of that row are divided among the threads.</p>
+<p>Assume that our block has <img src="https://latex.codecogs.com/png.latex?T"> threads. The most natural mapping is:</p>
+<pre class="text"><code>thread 0 -&gt; columns 0, T, 2T, ...
+thread 1 -&gt; columns 1, T + 1, 2T + 1, ...
+thread 2 -&gt; columns 2, T + 2, 2T + 2, ...
+...</code></pre>
+<p>Or, written as one indexing rule,</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Ctext%7Bcolumn%7D%20=%20%5Ctext%7BthreadIdx.x%7D%20+%20kT,%0A%5Cqquad%20k=0,1,2,%5Cldots%0A"></p>
+<p>Let us use a tiny example before jumping to a real warp. Say our row has <em>eight</em> elements and the block has <em>four</em> threads.</p>
+<p>During the first loop iteration, the four threads read</p>
+<pre class="text"><code>thread 0 -&gt; x[0]
+thread 1 -&gt; x[1]
+thread 2 -&gt; x[2]
+thread 3 -&gt; x[3]</code></pre>
+<p>During the next iteration, every thread moves forward by four:</p>
+<pre class="text"><code>thread 0 -&gt; x[4]
+thread 1 -&gt; x[5]
+thread 2 -&gt; x[6]
+thread 3 -&gt; x[7]</code></pre>
+<p><img src="https://heyyanshuman.com/posts/assets/softmax_kernel/coalesced_row_access.svg" class="img-fluid" style="width:100.0%" alt="A four-thread teaching block reading an eight-element Softmax row. Threads zero through three first read adjacent columns zero through three, then advance by four to read adjacent columns four through seven."></p>
+<p>If you notice, one thread jumps by <img src="https://latex.codecogs.com/png.latex?T"> elements over time, but neighboring threads read neighboring elements at the same instant.</p>
+<p>For a real warp, <img src="https://latex.codecogs.com/png.latex?T=32">. The first loop iteration reads columns 0 through 31, the second reads columns 32 through 63, and so on. Every iteration therefore produces one coalesced chunk of 32 FP32 values.</p>
+<p>Great, this is the access pattern we were looking for. Except we also broke something. Now every thread sees only a slice of the row.</p>
+<p>Let us use this row:</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Cmathbf%7Bx%7D=%5B3,1,2,0,6,4,5,1%5D.%0A"></p>
+<p>With four threads, the work is divided like this:</p>
+<pre class="text"><code>thread 0 -&gt; [x0, x4] -&gt; [3, 6]
+thread 1 -&gt; [x1, x5] -&gt; [1, 4]
+thread 2 -&gt; [x2, x6] -&gt; [2, 5]
+thread 3 -&gt; [x3, x7] -&gt; [0, 1]</code></pre>
+<p>Each thread can run online Softmax on its two values. But it only produces a <em>local</em> maximum and a <em>local</em> denominator:</p>
+<p><img src="https://heyyanshuman.com/posts/assets/softmax_kernel/local_online_statistics.svg" class="img-fluid" style="width:100.0%" alt="Four threads process different slices of one row and produce four local maxima and four local denominators."></p>
+<p>So now we have</p>
+<pre class="text"><code>local maxima       = [6, 4, 5, 1]
+local denominators = [1.0498, 1.0498, 1.0498, 1.3679]</code></pre>
+<section id="reducing-the-maximum" class="level4">
+<h4 class="anchored" data-anchor-id="reducing-the-maximum">Reducing the maximum</h4>
+<p>What we actually need is one maximum and one denominator for the complete row. For that we need to turn</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5B6,4,5,1%5D%0A"></p>
+<p>into a single value. We could ask thread 0 to read the other three values and find the maximum sequentially. But then we are back to making one thread do all the work.</p>
+<p>Instead, let the threads compare pairs of values.</p>
+<p>In the first round, we compare values that are two positions apart:</p>
+<pre class="text"><code>thread 0 -&gt; max(6, 5) = 6
+thread 1 -&gt; max(4, 1) = 4</code></pre>
+<p>Four candidates have now become two. In the second round, we compare the two remaining values:</p>
+<pre class="text"><code>thread 0 -&gt; max(6, 4) = 6</code></pre>
+<p>And we are done. Thread 0 now holds the maximum of the complete row.</p>
+<p>This pattern is called a <strong>reduction</strong>. At every round, half of the candidates disappear. Our four-value example takes two rounds. A warp has 32 values, so it takes five:</p>
+<pre class="text"><code>offset 16 -&gt; 32 values become 16
+offset  8 -&gt; 16 values become 8
+offset  4 -&gt;  8 values become 4
+offset  2 -&gt;  4 values become 2
+offset  1 -&gt;  2 values become 1</code></pre>
+<p>Notice that we still perform 31 comparisons to reduce 32 values. The number of comparisons did not magically shrink. The difference is that those comparisons happen in five parallel rounds instead of one chain of 31 comparisons.</p>
+</section>
+<section id="correcting-the-local-denominators" class="level4">
+<h4 class="anchored" data-anchor-id="correcting-the-local-denominators">Correcting the local denominators</h4>
+<p>With the row maximum in hand, the next step is to add the local denominators. But before we do that, notice that thread 0 calculated its denominator relative to 6, thread 1 used 4, thread 2 used 5, and thread 3 used 1:</p>
+<pre class="text"><code>thread 0 -&gt; 1.0498 is relative to 6
+thread 1 -&gt; 1.0498 is relative to 4
+thread 2 -&gt; 1.0498 is relative to 5
+thread 3 -&gt; 1.3679 is relative to 1</code></pre>
+<p>Adding these numbers directly would be wrong because their exponentials use different maxima. Before adding them, we need to express all four denominators relative to the row maximum, which is 6.</p>
+<p>We already learned how to do that in online Softmax. If a thread has local maximum <img src="https://latex.codecogs.com/png.latex?m_t"> and local denominator <img src="https://latex.codecogs.com/png.latex?L_t">, we correct it using</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0AL_t%5E%7B%5Ctext%7Bcorrected%7D%7D=L_t%20e%5E%7Bm_t-m%7D,%0A"></p>
+<p>where <img src="https://latex.codecogs.com/png.latex?m"> is the maximum of the complete row.</p>
+<p>Let us apply this to every thread:</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Cbegin%7Baligned%7D%0A%5Ctext%7Bthread%200%7D:&amp;%5Cquad%201.0498e%5E%7B6-6%7D%20%5Capprox%201.0498,%5C%5C%0A%5Ctext%7Bthread%201%7D:&amp;%5Cquad%201.0498e%5E%7B4-6%7D%20%5Capprox%200.1421,%5C%5C%0A%5Ctext%7Bthread%202%7D:&amp;%5Cquad%201.0498e%5E%7B5-6%7D%20%5Capprox%200.3862,%5C%5C%0A%5Ctext%7Bthread%203%7D:&amp;%5Cquad%201.3679e%5E%7B1-6%7D%20%5Capprox%200.0092.%0A%5Cend%7Baligned%7D%0A"></p>
+<p><img src="https://heyyanshuman.com/posts/assets/softmax_kernel/max_and_sum_reductions.svg" class="img-fluid" style="width:100.0%" alt="Four local maxima are reduced to row maximum six. Each local denominator is then corrected so that all four use the same row maximum."></p>
+<p>After this correction, all four denominators are relative to the same maximum, so the next step is to add them.</p>
+</section>
+<section id="reducing-the-sum" class="level4">
+<h4 class="anchored" data-anchor-id="reducing-the-sum">Reducing the sum</h4>
+<p>The sum reduction follows the exact same pattern. We just replace <code>max</code> with addition. Our corrected values are</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5B1.0498,0.1421,0.3862,0.0092%5D.%0A"></p>
+<p>First round:</p>
+<pre class="text"><code>thread 0 -&gt; 1.0498 + 0.3862 = 1.4360
+thread 1 -&gt; 0.1421 + 0.0092 = 0.1513</code></pre>
+<p>Second round:</p>
+<pre class="text"><code>thread 0 -&gt; 1.4360 + 0.1513 = 1.5873</code></pre>
+<p><img src="https://heyyanshuman.com/posts/assets/softmax_kernel/sum_reduction_steps.svg" class="img-fluid" style="width:100.0%" alt="A four-lane sum reduction. Two pairs are added in the first round, and the remaining pair is added in the second round to produce 1.5873."></p>
+<p>So the denominator for the complete row is</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0AL=1.5873.%0A"></p>
+<p>We finally have everything required to calculate Softmax: the row maximum is 6 and the row denominator is 1.5873. Every thread can now revisit its columns and write the corresponding outputs.</p>
+</section>
+<section id="exchanging-values-between-threads" class="level4">
+<h4 class="anchored" data-anchor-id="exchanging-values-between-threads">Exchanging values between threads</h4>
+<p>We kept saying that thread 0 reads a value from thread 2, then thread 1 reads a value from thread 3. But all these partial values live in registers owned by different threads. How does one thread read another thread’s register?</p>
+<p>Remember <code>__shfl_down_sync</code>? which we used for exact such usage in GEMV kernel worklog. It lets a thread read a register value held by another thread in the same warp.</p>
+<div class="sourceCode" id="cb15" style="background: #f1f3f5;"><pre class="sourceCode cpp code-with-copy"><code class="sourceCode cpp"><span id="cb15-1">__device__ __forceinline__ <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span> warpReduceMax<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span> value<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span></span>
+<span id="cb15-2">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">for</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> offset <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">16</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span> offset <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&gt;</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span> offset <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/=</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span></span>
+<span id="cb15-3">        value <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> max<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span></span>
+<span id="cb15-4">            value<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb15-5">            __shfl_down_sync<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="bn" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0xffffffff</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> value<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> offset<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span></span>
+<span id="cb15-6">        <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">);</span></span>
+<span id="cb15-7">    <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span>
+<span id="cb15-8">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">return</span> value<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb15-9"><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span>
+<span id="cb15-10"></span>
+<span id="cb15-11">__device__ __forceinline__ <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span> warpReduceSum<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span> value<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span></span>
+<span id="cb15-12">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">for</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> offset <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">16</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span> offset <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&gt;</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span> offset <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/=</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span></span>
+<span id="cb15-13">        value <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+=</span> __shfl_down_sync<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="bn" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0xffffffff</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> value<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> offset<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">);</span></span>
+<span id="cb15-14">    <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span>
+<span id="cb15-15">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">return</span> value<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb15-16"><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span></code></pre></div>
+<div class="callout callout-style-default callout-note callout-titled" title="What does __forceinline__ mean?">
+<div class="callout-header d-flex align-content-center" data-bs-toggle="collapse" data-bs-target=".callout-3-contents" aria-controls="callout-3" aria-expanded="false" aria-label="Toggle callout">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+What does <strong>forceinline</strong> mean?
+</div>
+<div class="callout-btn-toggle d-inline-block border-0 py-1 ps-1 pe-0 float-end"><i class="callout-toggle"></i></div>
+</div>
+<div id="callout-3" class="callout-3-contents callout-collapse collapse">
+<div class="callout-body-container callout-body">
+<p>Normally, calling a function means jumping to that function and returning when it is done. When a function is <strong>inlined</strong>, the compiler instead places the function’s instructions directly where it is called.</p>
+<p><code>__forceinline__</code> tells the CUDA compiler to inline the function instead of deciding for itself. That makes sense for helpers such as <code>warpReduceMax</code> and <code>warpReduceSum</code>: they are small, called frequently, and we do not want a function call around a five-step reduction.</p>
+<p>Inlining does not change what the function computes or how threads cooperate. It only changes how the compiler places its instructions in the generated GPU code. The trade-off is that forcing a large function to be inlined can make the compiled code much bigger, so we mainly use it for small helpers like these.</p>
+</div>
+</div>
+</div>
+<div class="callout callout-style-default callout-note callout-titled" title="What does __shfl_down_sync actually do?">
+<div class="callout-header d-flex align-content-center" data-bs-toggle="collapse" data-bs-target=".callout-4-contents" aria-controls="callout-4" aria-expanded="false" aria-label="Toggle callout">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+What does __shfl_down_sync actually do?
+</div>
+<div class="callout-btn-toggle d-inline-block border-0 py-1 ps-1 pe-0 float-end"><i class="callout-toggle"></i></div>
+</div>
+<div id="callout-4" class="callout-4-contents callout-collapse collapse">
+<div class="callout-body-container callout-body">
+<p>Let us unpack this line:</p>
+<div class="sourceCode" id="cb16" style="background: #f1f3f5;"><pre class="sourceCode cpp code-with-copy"><code class="sourceCode cpp"><span id="cb16-1">__shfl_down_sync<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="bn" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0xffffffff</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> value<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> offset<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span></span></code></pre></div>
+<ul>
+<li><p><code>0xffffffff</code> is a 32-bit mask with every bit set to 1. Each bit represents one lane, so this says that all 32 lanes in the warp are participating in the shuffle. This is valid here because our complete warp executes the reduction. If only some lanes participated, the mask would need to describe that subset.</p></li>
+<li><p><code>value</code> is the number held by the current lane. Since every lane calls this function, every lane passes its own number. The function then gives each lane the <code>value</code> from the lane <code>offset</code> positions ahead of it. For example, when <code>offset</code> is 2, lane 0 gets lane 2’s <code>value</code>.</p></li>
+<li><p><code>offset</code> tells a lane how far down the warp it should read. Lane <img src="https://latex.codecogs.com/png.latex?l"> receives the value held by lane <img src="https://latex.codecogs.com/png.latex?l+%5Ctext%7Boffset%7D">.</p></li>
+</ul>
+<p>For our four-value example, start with</p>
+<pre class="text"><code>lane           0  1  2  3
+value          6  4  5  1</code></pre>
+<p>At <code>offset = 2</code>, we can think of the call as</p>
+<div class="sourceCode" id="cb18" style="background: #f1f3f5;"><pre class="sourceCode cpp code-with-copy"><code class="sourceCode cpp"><span id="cb18-1"><span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span> other_value <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> __shfl_down_sync<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="bn" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0xffffffff</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> value<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">);</span></span></code></pre></div>
+<p>Lane 0 gets lane 2’s copy of <code>value</code>, which is 5. Lane 1 gets lane 3’s copy, which is 1. The shuffle only fetches those partner values. The <code>max</code> outside it performs the actual update:</p>
+<pre class="text"><code>lane 0: value = max(6, 5) = 6
+lane 1: value = max(4, 1) = 4</code></pre>
+<p>Our remaining values are now <code>[6, 4]</code>. At <code>offset = 1</code>, lane 0 receives lane 1’s updated value, which is 4:</p>
+<pre class="text"><code>lane 0: value = max(6, 4) = 6</code></pre>
+<p>That is all the intrinsic is doing. <code>__shfl_down_sync</code> moves the partner value; the surrounding <code>max</code> or addition decides how that value updates the running result. In a real 32-lane warp, only the lower half contains useful combined results after each round, but all lanes named by the mask still execute the shuffle.</p>
+</div>
+</div>
+</div>
+<p>For an offset of 16, lane 0 reads lane 16, lane 1 reads lane 17, and so on. The offset is then halved until lane 0 contains the final result. We do not need to move these values through global memory or even shared memory. They travel directly between registers inside the warp.</p>
+<p>Only lane 0 owns the final reduced value. Since every lane needs the row maximum and denominator during normalization, lane 0 broadcasts them back to the warp.</p>
+<p>Alright, we can now write the complete algorithm:</p>
+<pre class="text"><code>one warp processes one row:
+    every lane runs online Softmax over columns
+        lane_id, lane_id + 32, lane_id + 64, ...
+
+    row_max = reduce_max(local_max)
+    broadcast row_max from lane 0
+
+    corrected_denominator =
+        local_denominator * exp(local_max - row_max)
+
+    row_denominator = reduce_sum(corrected_denominator)
+    broadcast row_denominator from lane 0
+
+    every lane revisits its columns and writes:
+        exp(X[row, column] - row_max) / row_denominator</code></pre>
+<p>For now, we are deliberately using one warp per row. If we later use multiple warps for one row, a warp shuffle alone will not be enough because shuffles do not cross warp boundaries. We would then need one additional reduction through shared memory. Let us not add that machinery until we actually need it.</p>
+</section>
+</section>
+<section id="cost-after-coalescing" class="level3">
+<h3 class="anchored" data-anchor-id="cost-after-coalescing">Cost after coalescing</h3>
+<section id="memory-access-2" class="level4">
+<h4 class="anchored" data-anchor-id="memory-access-2">Memory access</h4>
+<p>Let us see the cost of this optimization, starting with memory. The online algorithm still reads every input twice and writes every output once:</p>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th>Operation</th>
+<th style="text-align: right;">Elements transferred</th>
+<th style="text-align: right;">Bytes transferred</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>First read of <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7BX%7D"></td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?MN"></td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?4MN"></td>
+</tr>
+<tr class="even">
+<td>Second read of <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7BX%7D"></td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?MN"></td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?4MN"></td>
+</tr>
+<tr class="odd">
+<td>Write <img src="https://latex.codecogs.com/png.latex?%5Cmathbf%7BY%7D"></td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?MN"></td>
+<td style="text-align: right;"><img src="https://latex.codecogs.com/png.latex?4MN"></td>
+</tr>
+<tr class="even">
+<td><strong>Total useful traffic</strong></td>
+<td style="text-align: right;"><strong><img src="https://latex.codecogs.com/png.latex?3MN"></strong></td>
+<td style="text-align: right;"><strong><img src="https://latex.codecogs.com/png.latex?12MN"></strong></td>
+</tr>
+</tbody>
+</table>
+<p>So the number of useful bytes did not change. What changed is how efficiently those bytes travel through the memory system.</p>
+<p>Recall the transaction efficiency from the GEMV chapter. With one thread per row, a warp could use only 128 bytes out of 1024 bytes requested from the memory system:</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Ceta_%7B%5Ctext%7Bone%20thread%20per%20row%7D%7D%0A%20%20=%5Cfrac%7B128%7D%7B1024%7D%0A%20%20=%5Cfrac%7B1%7D%7B8%7D%0A%20%20=12.5%5C%25.%0A"></p>
+<p>With one warp reading across one row, the same 128 useful bytes occupy four 32-byte sectors:</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Ceta_%7B%5Ctext%7Bone%20warp%20per%20row%7D%7D%0A%20%20=%5Cfrac%7B128%7D%7B128%7D%0A%20%20=1.%0A"></p>
+<p>Under this simplified transaction model, the effective traffic changes from</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Cfrac%7B12MN%7D%7B1/8%7D=96MN%20%5Cquad%20%5Ctext%7Bbytes%7D%0A"></p>
+<p>to</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Cfrac%7B12MN%7D%7B1%7D=12MN%20%5Cquad%20%5Ctext%7Bbytes%7D.%0A"></p>
+<p>That is up to an <strong>8x improvement in memory-transaction efficiency</strong>. Hold your horses though, because it does not mean that the kernel must become exactly 8x faster. Cache hits, alignment, row size, exponentials, and the reduction work all affect the final runtime.</p>
+<p><em>Bottomline is that we have stopped throwing away seven out of every eight bytes moved by our simplified model.</em></p>
+<p>Ignoring the small reduction overhead for a moment, the effective arithmetic intensity moves from</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0AAI_%7B%5Ctext%7Buncoalesced%7D%7D%0A%20%20%5Capprox%5Cfrac%7B4MN%7D%7B96MN%7D%0A%20%20=%5Cfrac%7B1%7D%7B24%7D%0A%20%20%5Capprox0.0417%5C%20%5Ctext%7BFLOPs/byte%7D%0A"></p>
+<p>to</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0AAI_%7B%5Ctext%7Bcoalesced%7D%7D%0A%20%20%5Capprox%5Cfrac%7B4MN%7D%7B12MN%7D%0A%20%20=%5Cfrac%7B1%7D%7B3%7D%0A%20%20%5Capprox0.333%5C%20%5Ctext%7BFLOPs/byte%7D.%0A"></p>
+<p><strong>Boom!</strong></p>
+<p>We did not change Softmax’s theoretical arithmetic intensity here. We simply stopped the bad access pattern from reducing its <em>effective</em> arithmetic intensity.</p>
+</section>
+<section id="computation-and-communication" class="level4">
+<h4 class="anchored" data-anchor-id="computation-and-communication">Computation and communication</h4>
+<p>Of course, the reductions are not free. Let the warp size be <img src="https://latex.codecogs.com/png.latex?W=32">:</p>
+<ul>
+<li>Finding the row maximum requires <img src="https://latex.codecogs.com/png.latex?W-1=31"> comparisons.</li>
+<li>Correcting the local denominators requires <img src="https://latex.codecogs.com/png.latex?W"> subtractions, <img src="https://latex.codecogs.com/png.latex?W"> exponentials, and <img src="https://latex.codecogs.com/png.latex?W"> multiplications.</li>
+<li>Reducing the corrected denominators requires <img src="https://latex.codecogs.com/png.latex?W-1=31"> additions.</li>
+</ul>
+<p>The ordinary floating-point overhead per row is therefore</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Cunderbrace%7BW%7D_%7B%5Ctext%7Bcorrection%20subtractions%7D%7D%0A+%5Cunderbrace%7BW%7D_%7B%5Ctext%7Bcorrection%20multiplications%7D%7D%0A+%5Cunderbrace%7BW-1%7D_%7B%5Ctext%7Breduction%20additions%7D%7D%0A=3W-1%20%5Cquad%20%5Ctext%7BFLOPs%7D.%0A"></p>
+<p>Across all <img src="https://latex.codecogs.com/png.latex?M"> rows, that is</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0AM(3W-1)%20%5Cquad%20%5Ctext%7Badditional%20FLOPs%7D,%0A"></p>
+<p>plus <img src="https://latex.codecogs.com/png.latex?MW"> additional exponential evaluations. For rows containing hundreds or thousands of elements, this fixed amount of work is small compared with the work across all <img src="https://latex.codecogs.com/png.latex?MN"> elements.</p>
+<div class="callout callout-style-default callout-note callout-titled" title="Communication cost of the warp algorithm">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+Communication cost of the warp algorithm
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Let us first count the communication in our four-thread example.</p>
+<p>The maximum reduction took two rounds. In the first round, threads 0 and 1 read from threads 2 and 3. In the second round, thread 0 read the remaining value from thread 1. Once thread 0 had the maximum, it broadcast that value to the other threads. So finding and sharing the maximum required</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Cunderbrace%7B2%7D_%7B%5Ctext%7Breduce%20maximum%7D%7D%0A+%5Cunderbrace%7B1%7D_%7B%5Ctext%7Bbroadcast%20maximum%7D%7D%0A=3%0A"></p>
+<p>communication steps.</p>
+<p>We then repeated the same pattern for the denominator: two rounds to add the four partial denominators and one broadcast to share the result. The complete Softmax calculation therefore required</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0A%5Cunderbrace%7B2%7D_%7B%5Ctext%7Breduce%20maximum%7D%7D%0A+%5Cunderbrace%7B1%7D_%7B%5Ctext%7Bbroadcast%20maximum%7D%7D%0A+%5Cunderbrace%7B2%7D_%7B%5Ctext%7Breduce%20denominator%7D%7D%0A+%5Cunderbrace%7B1%7D_%7B%5Ctext%7Bbroadcast%20denominator%7D%7D%0A=6%0A"></p>
+<p>warp-level communication steps for four threads.</p>
+<p>Now we can generalize. Every reduction round cuts the number of remaining values in half. Reducing <img src="https://latex.codecogs.com/png.latex?W"> values therefore takes <img src="https://latex.codecogs.com/png.latex?%5Clceil%5Clog_2%20W%5Crceil"> rounds. Softmax performs two reductions and two broadcasts, giving</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0AC_%7B%5Ctext%7Bcomm%7D%7D(W)%0A=2%5Cleft%5Clceil%5Clog_2%20W%5Cright%5Crceil+2.%0A"></p>
+<p>For a full warp of 32 threads,</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0AC_%7B%5Ctext%7Bcomm%7D%7D(32)=2(5)+2=12.%0A"></p>
+<p>Those 12 steps are five shuffles to find the maximum, one broadcast of the maximum, five shuffles to add the denominators, and one broadcast of the final denominator.</p>
+<p>All 32 lanes perform each step together. We are not sending 32 messages one after another. The values also move directly between registers, so none of this communication is added to the <img src="https://latex.codecogs.com/png.latex?12MN"> bytes moving through global memory.</p>
+<p>If one shuffle takes <img src="https://latex.codecogs.com/png.latex?t_%7B%5Ctext%7Bshuffle%7D%7D">, the communication time for one row is approximately</p>
+<p><img src="https://latex.codecogs.com/png.latex?%0AT_%7B%5Ctext%7Bcomm,row%7D%7D%0A%5Capprox%0A%5Cleft(2%5Cleft%5Clceil%5Clog_2%20W%5Cright%5Crceil+2%5Cright)t_%7B%5Ctext%7Bshuffle%7D%7D.%0A"></p>
+</div>
+</div>
+<p>Previously, one thread handled all <img src="https://latex.codecogs.com/png.latex?N"> elements in each pass. Now each lane handles only about <img src="https://latex.codecogs.com/png.latex?%5Clceil%20N/W%5Crceil"> elements per pass, followed by the fixed communication cost above.</p>
+<p>We added a little communication inside the warp, but in return we got coalesced memory access and 32 threads working on the row together. That is a pretty good deal for a memory-bound kernel.</p>
+</section>
+</section>
+<section id="turning-the-complete-algorithm-into-code" class="level3">
+<h3 class="anchored" data-anchor-id="turning-the-complete-algorithm-into-code">Turning the complete algorithm into code</h3>
+<p>Alright, we now have every piece of the final kernel. One block contains exactly one warp, and one warp owns one row. Lane 0 handles columns <img src="https://latex.codecogs.com/png.latex?0,32,64,%5Cldots">, lane 1 handles columns <img src="https://latex.codecogs.com/png.latex?1,33,65,%5Cldots">, and so on.</p>
+<p>During the first pass, every lane keeps its own maximum and denominator in registers. The warp combines those partial results, broadcasts the two row-wide values, and makes one final coalesced pass to write the output.</p>
+<div class="sourceCode" id="cb22" style="background: #f1f3f5;"><pre class="sourceCode cpp code-with-copy"><code class="sourceCode cpp"><span id="cb22-1"><span class="pp" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">#include </span><span class="im" style="color: #00769E;
+background-color: null;
+font-style: inherit;">&lt;cuda_runtime.h&gt;</span></span>
+<span id="cb22-2"><span class="pp" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">#include </span><span class="im" style="color: #00769E;
+background-color: null;
+font-style: inherit;">&lt;math_constants.h&gt;</span></span>
+<span id="cb22-3"></span>
+<span id="cb22-4">__device__ __forceinline__ <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span> warpReduceMax<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span> value<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span></span>
+<span id="cb22-5">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">for</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> offset <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">16</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span> offset <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&gt;</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span> offset <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/=</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span></span>
+<span id="cb22-6">        value <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> fmaxf<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span></span>
+<span id="cb22-7">            value<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb22-8">            __shfl_down_sync<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="bn" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0xffffffff</span><span class="bu" style="color: null;
+background-color: null;
+font-style: inherit;">u</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> value<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> offset<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span></span>
+<span id="cb22-9">        <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">);</span></span>
+<span id="cb22-10">    <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span>
+<span id="cb22-11">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">return</span> value<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb22-12"><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span>
+<span id="cb22-13"></span>
+<span id="cb22-14">__device__ __forceinline__ <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span> warpReduceSum<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span> value<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span></span>
+<span id="cb22-15">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">for</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> offset <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">16</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span> offset <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&gt;</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span> offset <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/=</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">2</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span></span>
+<span id="cb22-16">        value <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+=</span> __shfl_down_sync<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="bn" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0xffffffff</span><span class="bu" style="color: null;
+background-color: null;
+font-style: inherit;">u</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> value<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> offset<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">);</span></span>
+<span id="cb22-17">    <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span>
+<span id="cb22-18">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">return</span> value<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb22-19"><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span>
+<span id="cb22-20"></span>
+<span id="cb22-21">__global__ <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">void</span> softmax_warp_kernel<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span></span>
+<span id="cb22-22">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">const</span> <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> <span class="ex" style="color: null;
+background-color: null;
+font-style: inherit;">__restrict__</span> input<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb22-23">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> <span class="ex" style="color: null;
+background-color: null;
+font-style: inherit;">__restrict__</span> output<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb22-24">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> M<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb22-25">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> N</span>
+<span id="cb22-26"><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span></span>
+<span id="cb22-27">    <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">// One block contains one warp, and one warp owns one row.</span></span>
+<span id="cb22-28">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> row <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> blockIdx<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">.</span>x<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb22-29">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> lane <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> threadIdx<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">.</span>x<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb22-30"></span>
+<span id="cb22-31">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">if</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span>row <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&gt;=</span> M<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span></span>
+<span id="cb22-32">        <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">return</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb22-33">    <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span>
+<span id="cb22-34"></span>
+<span id="cb22-35">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">const</span> <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> input_row <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> input <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> row <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> N<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb22-36">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> output_row <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> output <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+</span> row <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> N<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb22-37"></span>
+<span id="cb22-38">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span> local_max <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span>CUDART_INF_F<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb22-39">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span> local_denominator <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> <span class="fl" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0.0</span><span class="bu" style="color: null;
+background-color: null;
+font-style: inherit;">f</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb22-40"></span>
+<span id="cb22-41">    <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">// First coalesced pass: compute online statistics for this lane.</span></span>
+<span id="cb22-42">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">for</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> column <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> lane<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span> column <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&lt;</span> N<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span> column <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+=</span> warpSize<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span></span>
+<span id="cb22-43">        <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span> current <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> input_row<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">[</span>column<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">];</span></span>
+<span id="cb22-44"></span>
+<span id="cb22-45">        <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">if</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span>current <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&gt;</span> local_max<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span></span>
+<span id="cb22-46">            local_denominator <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*=</span> expf<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span>local_max <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> current<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">);</span></span>
+<span id="cb22-47">            local_max <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> current<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb22-48">        <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span>
+<span id="cb22-49"></span>
+<span id="cb22-50">        local_denominator <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+=</span> expf<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span>current <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> local_max<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">);</span></span>
+<span id="cb22-51">    <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span>
+<span id="cb22-52"></span>
+<span id="cb22-53">    <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">// Reduce the local maxima. The complete result lands in lane 0.</span></span>
+<span id="cb22-54">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span> row_max <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> warpReduceMax<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span>local_max<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">);</span></span>
+<span id="cb22-55"></span>
+<span id="cb22-56">    <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">// Broadcast the row maximum from lane 0 to every lane.</span></span>
+<span id="cb22-57">    row_max <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> __shfl_sync<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="bn" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0xffffffff</span><span class="bu" style="color: null;
+background-color: null;
+font-style: inherit;">u</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> row_max<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">);</span></span>
+<span id="cb22-58"></span>
+<span id="cb22-59">    <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">// Put every local denominator on the same scale.</span></span>
+<span id="cb22-60">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span> corrected_denominator <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span></span>
+<span id="cb22-61">        local_denominator <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> expf<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span>local_max <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> row_max<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">);</span></span>
+<span id="cb22-62"></span>
+<span id="cb22-63">    <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">// Reduce the corrected denominators and broadcast their sum.</span></span>
+<span id="cb22-64">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span> row_denominator <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> warpReduceSum<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span>corrected_denominator<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">);</span></span>
+<span id="cb22-65">    row_denominator <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span></span>
+<span id="cb22-66">        __shfl_sync<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="bn" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0xffffffff</span><span class="bu" style="color: null;
+background-color: null;
+font-style: inherit;">u</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> row_denominator<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">0</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">);</span></span>
+<span id="cb22-67"></span>
+<span id="cb22-68">    <span class="co" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">// Second coalesced pass: normalize and write the row.</span></span>
+<span id="cb22-69">    <span class="cf" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">for</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span><span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> column <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> lane<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span> column <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&lt;</span> N<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span> column <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">+=</span> warpSize<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span></span>
+<span id="cb22-70">        output_row<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">[</span>column<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">]</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span></span>
+<span id="cb22-71">            expf<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span>input_row<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">[</span>column<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">]</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">-</span> row_max<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">/</span> row_denominator<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb22-72">    <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span>
+<span id="cb22-73"><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span>
+<span id="cb22-74"></span>
+<span id="cb22-75"><span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">void</span> launch_softmax<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span></span>
+<span id="cb22-76">    <span class="at" style="color: #657422;
+background-color: null;
+font-style: inherit;">const</span> <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> <span class="ex" style="color: null;
+background-color: null;
+font-style: inherit;">__restrict__</span> input<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb22-77">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">float</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">*</span> <span class="ex" style="color: null;
+background-color: null;
+font-style: inherit;">__restrict__</span> output<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb22-78">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> M<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb22-79">    <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> N</span>
+<span id="cb22-80"><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">)</span> <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">{</span></span>
+<span id="cb22-81">    <span class="kw" style="color: #003B4F;
+background-color: null;
+font-weight: bold;
+font-style: inherit;">constexpr</span> <span class="dt" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">int</span> threads_per_block <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">=</span> <span class="dv" style="color: #AD0000;
+background-color: null;
+font-style: inherit;">32</span><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">;</span></span>
+<span id="cb22-82"></span>
+<span id="cb22-83">    dim3 block_size<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span>threads_per_block<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">);</span></span>
+<span id="cb22-84">    dim3 grid_size<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">(</span>M<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">);</span></span>
+<span id="cb22-85"></span>
+<span id="cb22-86">    softmax_warp_kernel<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&lt;&lt;&lt;</span>grid_size<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span> block_size<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">&gt;&gt;&gt;(</span></span>
+<span id="cb22-87">        input<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb22-88">        output<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb22-89">        M<span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">,</span></span>
+<span id="cb22-90">        N</span>
+<span id="cb22-91">    <span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">);</span></span>
+<span id="cb22-92"><span class="op" style="color: #5E5E5E;
+background-color: null;
+font-style: inherit;">}</span></span></code></pre></div>
+<p>The launcher uses exactly 32 threads because the reduction helpers communicate inside one warp. The kernel assumes that every row contains at least one element. A row can be wider than 32 elements; the loop simply gives each lane more columns separated by <code>warpSize</code>.</p>
+<p>Notice that the code follows the same order as our worked example:</p>
+<pre class="text"><code>compute one (local_max, local_denominator) pair per lane
+-&gt; reduce and broadcast row_max
+-&gt; correct every local_denominator
+-&gt; reduce and broadcast row_denominator
+-&gt; normalize the row</code></pre>
+</section>
+</section>
+<section id="main-takeaways" class="level2">
+<h2 class="anchored" data-anchor-id="main-takeaways">Main takeaways</h2>
+<p>Alright, that was a lot of work for an operation that fits in one line of mathematics. We started with the stable Softmax equation, wrote the most direct CUDA kernel, and then kept changing the algorithm until its execution matched the way a GPU wants to read memory and share work.</p>
+<p>If I had to compress the entire worklog into a few points, these would be the ones:</p>
+<ul>
+<li><p><strong>Numerical stability comes first.</strong> Subtracting the row maximum keeps the largest exponential equal to 1 and prevents large inputs from overflowing. A fast Softmax that is numerically unstable is not useful.</p></li>
+<li><p><strong>The obvious parallelization still left each row sequential.</strong> Giving one row to one thread parallelized the <img src="https://latex.codecogs.com/png.latex?M"> rows, but one thread still performed every operation within its row.</p></li>
+<li><p><strong>Online Softmax trades FLOPs for one fewer memory pass.</strong> By correcting the running denominator whenever the maximum changes, we fused the maximum and denominator passes. Global-memory traffic fell from <img src="https://latex.codecogs.com/png.latex?16MN"> bytes to <img src="https://latex.codecogs.com/png.latex?12MN"> bytes, even though we added some rescaling work.</p></li>
+<li><p><strong>Coalescing is decided by a warp, not by one thread.</strong> With one thread per row, neighboring lanes accessed different rows. With one warp per row, neighboring lanes accessed neighboring columns.</p></li>
+<li><p><strong>Moving to warp pattern means no thread has the complete answer.</strong> Each thread produces a local maximum and a local denominator. Warp reductions turn those 32 partial answers into one row-wide answer.</p></li>
+<li><p><strong>Partial denominators must use the same maximum before we add them.</strong> The factor <img src="https://latex.codecogs.com/png.latex?e%5E%7Bm_%7B%5Ctext%7Blocal%7D%7D-m_%7B%5Ctext%7Brow%7D%7D%7D"> puts every local denominator on the same scale before the sum reduction.</p></li>
+<li><p><strong>A little on-chip communication gave us a lot of useful parallelism.</strong> A 32-thread warp pays 12 communication steps per row. In return, 32 thread work on that row together and its global-memory accesses become coalesced.</p></li>
+</ul>
+<p>We did not change the mathematical definition of Softmax. We changed the order in which its statistics are computed and which threads own the work. That was enough to remove a complete read of the input, recover efficient memory transactions, and expose parallelism inside every row.</p>
+
+
+</section>
+
+ ]]></description>
+  <category>LLMs</category>
+  <category>Performance Optimization</category>
+  <guid>https://heyyanshuman.com/posts/making_softmax_fast.html</guid>
+  <pubDate>Fri, 11 Sep 2026 00:00:00 GMT</pubDate>
+  <media:content url="https://heyyanshuman.com/posts/assets/softmax_kernel/softmax-header.png" medium="image" type="image/png" height="61" width="144"/>
+</item>
 <item>
   <title>Making GEMV Fast</title>
   <link>https://heyyanshuman.com/posts/making_gemv_fast.html</link>
