@@ -17,4 +17,9 @@ page-layout: full
 
 Essays on agents, evals, post-training, model systems, and the practice of building with AI. Plus shorter notes and reflections.
 
-I also publish a weekly newsletter at [The Conductor](https://conductorbyam.substack.com/).
+I am also slowly compiling my CUDA kernel worklogs into
+[*How to make your models fast*](https://athleticcoder21.github.io/inference-book/),
+a small book focused, for now, on understanding and optimizing individual GPU
+kernels from first principles.
+
+I used to publish a weekly newsletter at [The Conductor](https://conductorbyam.substack.com/).
