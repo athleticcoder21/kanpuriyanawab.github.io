@@ -191,7 +191,7 @@ And one more thing, it is not gonna be another tutorial where I just give you bu
 magically SoTA, because in reality it doesn't work like that, haha. So, in case if you are new to RL, you will get a taste of how does training this models
 look like.
 
-This worklog uses code from this huggingface [tutorial](https://huggingface.co/learn/cookbook/en/trl_grpo_reasoning_advanced_reward).
+This worklog uses code from this huggingface [tutorial](https://huggingface.co/learn/cookbook/en/trl_grpo_reasoning_advanced_reward), except system prompt is little different.
 
 
 Alright, let's formalize the problem. Let's say for a question:
