@@ -1,0 +1,487 @@
+---
+title: "GRPO on GSM8K with small Qwens: a worklog"
+subtitle: "From a flat reward curve to a reward set that works on Qwen3-0.6B, and the Qwen2.5 gap we couldn't close"
+date: 2026-09-24
+description: "A GSM8K post-training worklog on reward design, warm-starts, and a live weight-sync drift."
+categories:
+  - LLMs
+  - RLVR
+output-file: posttraining_gsm8k_worklog.html
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    fig-width: 8
+    fig-height: 4
+execute:
+  echo: false
+  warning: false
+jupyter: python3
+---
+
+<!--
+From the site root, run posts/posttraining_gsm8k_worklog/setup.sh to install dependencies and
+render this page. The Plotly charts use posts/posttraining_gsm8k_worklog/data/*.parquet; W&B
+credentials are needed only if a cached run is missing.
+-->
+
+```{python}
+#| label: setup
+#| include: false
+import os
+from pathlib import Path
+
+import pandas as pd
+import plotly.graph_objects as go
+from dotenv import load_dotenv
+from IPython.display import display
+
+load_dotenv(".env", override=True)
+PROJECT = f"{os.environ.get('WANDB_ENTITY', 'ml-colabs')}/{os.environ.get('WANDB_PROJECT', 'rlvr-gsm8k')}"
+CACHE = Path("posttraining_gsm8k_worklog/data")
+STEP = "train/global_step"
+
+
+def history(run_id: str) -> pd.DataFrame:
+    """Read the chart metrics cached for a run."""
+    f = CACHE / f"{run_id}.parquet"
+    if not f.exists():
+        raise FileNotFoundError(f"Missing {f}; run posts/posttraining_gsm8k_worklog/setup.sh")
+    return pd.read_parquet(f)
+
+
+def run_url(run_id: str) -> str:
+    return f"https://wandb.ai/{PROJECT}/runs/{run_id}"
+
+
+def line(series, title, ytitle, smooth=1, log_y=False, hline=None, max_step=None, markers=False):
+    """series: list of (run_id, metric, label). Rolling-mean smoothing over `smooth` logged steps."""
+    fig = go.Figure()
+    for run_id, key, label in series:
+        h = history(run_id)
+        if key not in h or STEP not in h:
+            continue
+        d = h[[STEP, key]].dropna().sort_values(STEP)
+        if max_step is not None:
+            d = d[d[STEP] <= max_step]
+        y = d[key].rolling(smooth, min_periods=1).mean() if smooth > 1 else d[key]
+        fig.add_trace(
+            go.Scatter(
+                x=d[STEP], y=y, name=label, mode="lines+markers" if markers else "lines",
+                hovertemplate=f"{label}<br>step %{{x}}<br>%{{y:.4f}}<extra>{run_id}</extra>",
+            )
+        )
+    if hline is not None:
+        fig.add_hline(y=hline[0], line_dash="dot", annotation_text=hline[1], annotation_position="top left")
+    fig.update_layout(
+        title=title, xaxis_title="training step", yaxis_title=ytitle, template="plotly_white",
+        legend=dict(orientation="h", yanchor="bottom", y=-0.35), margin=dict(t=50, b=10),
+    )
+    if log_y:
+        fig.update_yaxes(type="log")
+    return fig
+
+
+# Initialize Plotly in this hidden cell so the first chart has one output.
+display(go.Figure())
+```
+
+## Where this started
+
+The goal was simple: take a small instruct model, train it on GSM8K with GRPO
+(Group Relative Policy Optimization, the RL method that scores a group of
+sampled answers per question and pushes the model toward the better ones),
+and see how far verifiable rewards alone can take it.
+
+The training code came from Hugging Face's cookbook,
+[*GRPO with advanced reward functions*](https://huggingface.co/learn/cookbook/en/trl_grpo_reasoning_advanced_reward):
+Qwen2.5 Instruct, TRL's `GRPOTrainer`, LoRA, and an answer format with the
+reasoning between `<start_working_out>` and `<end_working_out>` and the answer
+inside `<SOLUTION>...</SOLUTION>`. We took the training setup but not the
+cookbook's reward functions. The rewards below are our own, and shaping them
+is most of this story.
+
+We logged the runs to W&B and used a vLLM server for rollouts.
+
+### Baselines first
+
+Before any training we benchmarked the models with the same system prompt the
+training would use. The main lesson, repeated through the whole project, is
+that **a small model's GSM8K score depends as much on the answer format as on
+its math.**
+
+| Model | Prompt | Strict (format + answer) | Lenient (answer only) |
+|---|---|---|---|
+| Qwen3-1.7B, thinking on | GSM8K `####` format | 0.875 | 0.875 |
+| Qwen3-1.7B, thinking off | GSM8K `####` format | 0.517 | 0.517 |
+| Qwen3-1.7B, thinking off | cookbook `<SOLUTION>` prompt | **0.040** | **0.801** |
+| Qwen3-1.7B, thinking off | `<SOLUTION>` prompt + worked example, "no `\boxed`" | 0.762 | 0.773 |
+| Qwen3-4B-Instruct-2507 | GSM8K `####` format | 0.918 | 0.918 |
+| Qwen2.5-1.5B-Instruct | GSM8K `####` format | 0.381 | 0.549 |
+
+*Greedy or model-default sampling, full GSM8K test split (1,319 questions).*
+
+With the cookbook prompt, Qwen3-1.7B got 80% of the math right but wrote the
+answer in `\boxed{}` 97% of the time, so a strict parser scored it 4%. Adding
+one worked example that uses the tags, plus "do not use `\boxed{}`", took
+strict accuracy from 0.04 to 0.76. We kept that prompt for every run.
+
+We also switched thinking off for Qwen3 everywhere: with it on, the model
+spends its token budget reasoning before it ever reaches the answer format.
+
+## Getting the first run to train at all
+
+The cookbook loads the model in 4-bit with `device_map="auto"`. In our setup,
+that caused problems:
+
+- **Out of memory.** The loss materializes fp32 logits over
+  Qwen's 152k-token vocabulary for every completion token. With 2,048-token
+  completions and 8 sequences in a batch, one tensor needed about 50 GB.
+  GSM8K answers need about 200 tokens, so 512 was plenty.
+- **`device_map="auto"` fights distributed training.** It shards one copy of the
+  model across devices, while `accelerate launch` expects a full copy per worker.
+  At 0.5B parameters, 4-bit quantization buys nothing, so we dropped it and
+  loaded the model in bf16.
+- **Generation on a separate vLLM server.** TRL's server mode syncs the
+  trainer's weights to vLLM after each update. That sync
+  becomes the villain of the last third of this worklog.
+
+## The first reward set, and a flat line
+
+The first runs used two rewards: a correctness check on the number inside
+`<SOLUTION>`, and a ±0.5 format reward for the exact tag structure. Reward
+stayed flat, and correctness sat around 8–10% the whole time.
+
+```{python}
+#| label: fig-flat
+#| fig-cap: "First runs on Qwen2.5-0.5B-Instruct: correctness never moves (20-step rolling mean)."
+line(
+    [("ugg8n2gm", "train/rewards/correctness_check/mean", "run 1: correctness + ±0.5 format"),
+     ("jr8dtkxv", "train/rewards/correctness_check/mean", "run 2: same, 300 steps"),
+     ("dszbz193", "train/rewards/correctness_check/mean", "run 3: filtered data, group size 4")],
+    "Correctness (answer inside <SOLUTION>)", "fraction correct", smooth=20,
+)
+```
+
+TRL's rollout tables (`log_completions=True` writes every prompt, completion
+and reward to W&B) told us why: **76% of the wrong answers had no
+`<SOLUTION>` block at all.** The model often knew the answer; it just wasn't
+putting it where the parser looked.
+
+### Rejection sampling from logged rollouts
+
+A group where all 8 samples are wrong, or all 8 are right, has zero reward
+variance, so GRPO learns nothing from it. We wrote `filter_rollouts.py` to
+download a run's rollout tables from W&B, group them per question, and drop
+questions that were always wrong or always right. On run 2 that dropped 57% of
+the questions it had seen, almost all always-wrong.
+
+### Why run 3 was still flat: the updates were too small
+
+Run 3 trained on the filtered data with groups of 4 and was still flat. This
+time the metrics showed why:
+
+```{python}
+#| label: fig-gradclip
+#| fig-cap: "Run 3: gradient norm sits above max_grad_norm=0.1 on 79% of steps, so nearly every update was clipped."
+line([("dszbz193", "train/grad_norm", "grad norm")], "Gradient norm vs. the clip threshold", "grad norm",
+     smooth=5, hline=(0.1, "max_grad_norm = 0.1"))
+```
+
+Three settings stacked up: a learning rate of 5e-6 (typical for full
+fine-tuning, but LoRA usually needs about 10× more), gradients clipped at 0.1
+on nearly every step, and LoRA on `q_proj`/`v_proj` only. We moved to
+3e-5, `max_grad_norm=1.0`, and LoRA on every linear layer.
+
+::: {.callout-note}
+## A metric we misread
+We briefly worried that `clip_ratio` sat at about 1e-4. It turns out it can't
+move here: with one gradient step per batch (`num_iterations=1`), TRL sets the
+"old" log-probabilities equal to the current ones, so the PPO ratio is exactly
+1 and clipping never triggers. It only means something with
+`num_iterations > 1`.
+:::
+
+## Shaping the reward
+
+With the optimizer fixed, the rewards could finally move. We added them one at
+a time, each aimed at a failure we could see in the rollout tables:
+
+| Reward | Gives | Weight | Added because |
+|---|---|---|---|
+| `exact_check` | 1 if the format is exact **and** the answer is right | 2.0 | the actual target deserves the most credit |
+| `correctness_check` | 1 if the `<SOLUTION>` answer is right | 1.0 | the original correctness signal |
+| `lenient_correctness_check` | 1 if the right number appears anywhere | 0.5 | right math in the wrong place should beat wrong math |
+| `format_check` | 1 for the exact tag structure (0/1 instead of ±0.5) | 0.5 | strict format |
+| `tag_check` | 0.125 per tag present exactly once (max 0.5) | 1.0 | a stepping stone while strict format is ~0; repeating a tag earns nothing |
+| `step_check` | fraction of the reference solution's intermediate results reached | 0.5 | signal on questions where the answer is still wrong |
+| `solution_number_check` | 1 if `<SOLUTION>` holds just a number | 0.25 | rollouts put things like `$10 + $2.` in the tag |
+
+A perfect completion scores 5.25. `step_check` takes the intermediate results
+GSM8K's reference solutions annotate as `<<48/2=24>>`, skips the final answer
+and any number already in the question, and scores the fraction that shows up
+in the reasoning. Its credit shrinks when a completion contains far more
+numbers than a real solution would, so listing numbers doesn't pay. In
+groups where strict correctness was identical for all samples (56% of them),
+`step_check` still varied in 85%.
+
+### Presampling instead of filtering from logs
+
+Filtering from a run's logs only covers the questions that run happened to
+sample. So `presample.py` generates *k* samples for every training question
+with offline vLLM (7,473 × 8 samples) and scores them
+before training. It raised one scoring decision:
+
+- **Strict scoring** (answer must be in `<SOLUTION>`): 5,330 of 7,473
+  questions were always wrong at *k*=4, leaving 2,129.
+- **Lenient scoring** (tags, else the last number): only 2,950 always wrong.
+  **45% of the "always wrong" questions were format failures, not math
+  failures.**
+
+We filtered with lenient scoring: drop only what the model can't solve (or
+always solves), and let the format rewards teach the format on the rest.
+
+## Qwen3-0.6B: the reward set works
+
+We switched to Qwen3-0.6B (thinking off) and ran the full reward set.
+
+```{python}
+#| label: fig-qwen3
+#| fig-cap: "Same rewards, same recipe: Qwen3-0.6B climbs, Qwen2.5-0.5B stays flat (10-step rolling mean)."
+line(
+    [("9ue7k08w", "train/reward", "Qwen3-0.6B"),
+     ("cr6hatom", "train/reward", "Qwen2.5-0.5B-Instruct")],
+    "Total training reward (max 5.25)", "reward", smooth=10,
+)
+```
+
+On Qwen3, reward climbed from about 3.1 to 4.4. Strict format went from 0.74
+to 0.96, and test-set exact accuracy reached **0.67**, a little above the
+roughly 60% Qwen reports for this model size (approximate, from memory).
+Nearly all of the remaining gap to 5.25 was math, not format, so adding more
+rewards would have raised the number without making the model better.
+
+The same recipe on Qwen2.5-0.5B-Instruct barely moved: reward 1.09 → 1.31,
+test exact accuracy **0.056 → 0.063**. The rest of the project was about that
+gap.
+
+## Closing the Qwen2.5 gap: warm-starts
+
+The dropped questions (always wrong or always right for the base model, 2,093
+of them) were useless for RL, but could still teach the model before RL.
+Using them for a warm-up and the remaining 5,380 for RL keeps the two phases
+from sharing a question.
+
+### SFT warm-up
+
+We rewrote the GSM8K reference solutions into the exact tag format and
+fine-tuned on them, with loss on the answer only. All 7,473 rewritten
+solutions score 1.0 on our format and correctness rewards, so the model learns
+exactly what RL will reward.
+
+The first attempt died with NaN gradients at step 30 of 99, every time:
+
+```{python}
+#| label: fig-sft-nan
+#| fig-cap: "SFT: the first runs hit NaN gradients at step 30; with eager attention and fp32 master weights the run is clean."
+fig = line(
+    [("xque1787", "train/grad_norm", "SDPA attention (stopped by the NaN guard at step 30)"),
+     ("rylnmvbk", "train/grad_norm", "eager attention + fp32 master weights")],
+    "SFT gradient norm", "grad norm", markers=True,
+)
+fig.add_vline(x=30, line_dash="dot", line_color="crimson", annotation_text="step 30: grad_norm = NaN")
+fig
+```
+
+Every one of the 2,093 examples was fine on its own. Replaying TRL's batching
+in isolation found the culprit: **batch 232 gave a finite loss but NaN
+gradients**, and only through PyTorch's SDPA attention kernel in bf16. The
+same batch with SDPA in fp32, or eager attention in bf16, was fine. Switching
+SFT to eager attention (and fp32 master weights) fixed it.
+
+### OPD warm-up
+
+Next, on-policy distillation (OPD): the student samples its own answers,
+Qwen2.5-7B-Instruct scores every token of them, and the student minimizes the
+reverse KL to the teacher (TRL's `DistillationTrainer`, `beta=1`). With our
+prompt the 7B gets 91.7% strict correctness and 77% exact format on training
+questions, so it pulls toward exactly what the rewards want. Its vocabulary is
+padded to 152,064 rows against the student's 151,936, but both share the same
+151,665-token tokenizer, so trimming the teacher's unused rows is lossless.
+
+```{python}
+#| label: fig-opd
+#| fig-cap: "OPD warm-up: reverse KL to the 7B teacher on the student's own samples."
+line([("3fjg9zef", "train/loss", "reverse KL to Qwen2.5-7B-Instruct")], "OPD loss", "loss", smooth=5)
+```
+
+### Warm-ups compared
+
+```{python}
+#| label: fig-warmups
+#| fig-cap: "GSM8K test exact accuracy during RL, by warm-up. Qwen3-0.6B with no warm-up for reference."
+line(
+    [("cr6hatom", "eval/accuracy_exact", "Qwen2.5: no warm-up"),
+     ("6hqxh39p", "eval/accuracy_exact", "Qwen2.5: SFT warm-up"),
+     ("c0uc1sfx", "eval/accuracy_exact", "Qwen2.5: OPD warm-up"),
+     ("i7yh9cby", "eval/accuracy_exact", "Qwen2.5: OPD warm-up, fp32"),
+     ("9ue7k08w", "eval/accuracy_exact", "Qwen3-0.6B: no warm-up")],
+    "Test exact accuracy (right answer, exact format)", "accuracy", markers=True,
+)
+```
+
+| Qwen2.5-0.5B RL run | Test exact accuracy |
+|---|---|
+| no warm-up | 0.06 |
+| SFT warm-up | 0.22 |
+| OPD warm-up | 0.40 |
+| OPD warm-up, fp32 (see below) | 0.48 |
+| *Qwen3-0.6B, no warm-up* | *0.67* |
+
+Each warm-up raised the starting point, but the lines are flat: **RL itself
+added almost nothing on Qwen2.5** in any of these runs. The OPD run trained
+for 804 steps and test accuracy stayed between 0.400 and 0.411 the whole time.
+
+## The real problem: vLLM and the trainer drifting apart
+
+GRPO in server mode has two copies of the policy: vLLM generates the
+rollouts, the trainer computes gradients, and weights are synced after every
+update. TRL compares vLLM's log-probability of each sampled token with the
+trainer's. With its default `vllm_importance_sampling_mode="sequence_mask"`,
+it **drops any completion whose summed mismatch leaves a fixed range**. So
+the mismatch directly controls how much of each batch still contributes to
+learning.
+
+```{python}
+#| label: fig-isr
+#| fig-cap: "Importance-sampling ratio (1 = vLLM and trainer agree). Qwen3 starts at 1.0; every Qwen2.5 run starts lower and falls to 0.3–0.5, so most completions are masked out (10-step rolling mean)."
+line(
+    [("9ue7k08w", "train/sampling/importance_sampling_ratio/mean", "Qwen3-0.6B"),
+     ("cr6hatom", "train/sampling/importance_sampling_ratio/mean", "Qwen2.5: no warm-up"),
+     ("6hqxh39p", "train/sampling/importance_sampling_ratio/mean", "Qwen2.5: SFT warm-up"),
+     ("c0uc1sfx", "train/sampling/importance_sampling_ratio/mean", "Qwen2.5: OPD warm-up")],
+    "vLLM importance-sampling ratio", "mean ratio", smooth=10,
+)
+```
+
+Once we started looking, we found a series of bugs, each one real, and each
+fix revealing the next:
+
+1. **Mismatched dtypes killed every sync.** The SFT and OPD checkpoints were
+   saved in fp32, and vLLM's `--dtype auto` loaded them in fp32. The trainer
+   sent bf16 weights, vLLM read those bytes as fp32, and every
+   `/update_weights` failed its size check. vLLM kept generating from the
+   frozen starting weights. The SFT→RL run most likely trained this way
+   throughout: its per-token mismatch grew from 0.019 to 0.085.
+2. **LoRA dropout.** Early on, the ratio was 0.16 because `lora_dropout=0.1`
+   perturbs the trainer's log-probabilities while vLLM runs without dropout.
+   RL needs dropout 0.
+3. **Switching to `token_truncate` made it worse.** Weighting per token
+   instead of dropping whole sequences sounded like the fix. Instead it
+   trained on the stale samples that `sequence_mask` had been discarding, and
+   the mismatch compounded to over 5 nats per token:
+
+```{python}
+#| label: fig-runaway
+#| fig-cap: "Per-token vLLM-vs-trainer mismatch (log scale). With token_truncate it runs away within about 100 steps; with sequence_mask it only creeps."
+line(
+    [("c0uc1sfx", "train/sampling/sampling_logp_difference/mean", "sequence_mask (default)"),
+     ("6oyljev3", "train/sampling/sampling_logp_difference/mean", "token_truncate"),
+     ("46in4jdn", "train/sampling/sampling_logp_difference/mean", "token_truncate, reduced vLLM memory use")],
+    "Mean |trainer log p − vLLM log p| per token", "nats per token", smooth=3, log_y=True, max_step=260,
+)
+```
+
+4. **vLLM ran out of memory during syncs, silently.** Each sync tried to
+   allocate a buffer the size of the whole
+   model and failed, yet `/update_weights` still returned `200 OK`.
+5. **bf16 itself costs Qwen2.5 more than it seems.** The OPD checkpoint
+   converted to bf16 drifts from its own fp32 version by 0.43 nats per token,
+   against 0.047 for the base model. Merging and unmerging LoRA in bf16 at
+   every sync also leaves small errors in the trainer's base weights (2.5e-4
+   relative after 10 round trips; 4e-9 in fp32).
+
+Running the whole pipeline in fp32 (`TRAIN_DTYPE=float32`, vLLM
+`DTYPE=float32`) fixed the runaway, and the OPD model finally started from
+its real quality: 0.67 training exact accuracy at step 0 instead of about
+0.55, and **0.48** test exact accuracy. But the mismatch still wasn't flat:
+
+```{python}
+#| label: fig-fp32
+#| fig-cap: "First 20 steps, per-token mismatch. In fp32, Qwen2.5 starts at 0.0006, so the two sides are identical, then gains about 0.003 every step. Qwen3 (bf16) stays flat."
+line(
+    [("i7yh9cby", "train/sampling/sampling_logp_difference/mean", "Qwen2.5 fp32, original run"),
+     ("blyv9d73", "train/sampling/sampling_logp_difference/mean", "Qwen2.5 fp32, reduced parallelism"),
+     ("cpgrs28e", "train/sampling/sampling_logp_difference/mean", "Qwen2.5 fp32, reduced memory use"),
+     ("9ue7k08w", "train/sampling/sampling_logp_difference/mean", "Qwen3-0.6B bf16")],
+    "Mismatch over the first steps", "nats per token", max_step=20, markers=True,
+)
+```
+
+A mismatch that starts at zero and grows a little with every update means the
+two sides stop agreeing *because of training*. So we tested every piece of the
+sync offline, in fp32, on the adapter checkpoints the run had saved:
+
+| Test | Result (mean \|Δ log p\| per token) |
+|---|---|
+| vLLM vs Hugging Face, same tokens | 0.0007 for Qwen2.5 **and** Qwen3 |
+| TRL-style padded batches, train mode, gradient checkpointing | 0.0007 |
+| Trainer's unmerged LoRA vs merged weights | 0.00000 |
+| One sync through vLLM's weight loader (eager and compiled) | 0.0008 |
+| Three back-to-back NCCL syncs into a live `trl vllm-serve` | 0.0008, no growth |
+| Reduced training parallelism | still grows |
+| Reduced vLLM memory use | still grows |
+
+**Every piece checks out in isolation, but the live loop still drifts.**
+That's where this worklog stops: the drift is specific to Qwen2.5 in live
+training, and we haven't found its cause. While it's there, `sequence_mask`
+drops about 58% of every batch, which is a likely reason RL adds so little on
+top of the warm-starts.
+
+## What we learned
+
+- **Measure the format before the math.** A strict parser turned 80% math
+  accuracy into 4%. Most early "RL isn't learning" moments were format
+  failures, and the rollout tables showed it immediately.
+- **Flat reward has a checklist:** learning rate for LoRA, gradient clipping,
+  LoRA scope, groups with zero reward variance. Each fixed a real problem
+  here.
+- **Reward shaping works when each reward targets a failure you can see.**
+  On Qwen3-0.6B the full set reached 0.67 test exact accuracy with no warm-up.
+- **Warm-starts move the starting point, not the slope.** SFT and OPD took
+  Qwen2.5 from 0.06 to 0.22 and 0.40 (0.48 in fp32), but RL on top stayed
+  flat.
+- **Watch `sampling_logp_difference` from step 1.** A healthy server-mode run
+  holds it flat. Ours grew from a correct starting point, and every quiet
+  failure along the way (dtype, memory, dropout) showed up there first.
+- **Open question:** why Qwen2.5's trainer and vLLM copies drift apart during
+  live training when every sync step checks out in isolation.
+
+## Runs referenced
+
+```{python}
+#| label: tbl-runs
+from IPython.display import Markdown
+
+RUNS = [
+    ("ugg8n2gm", "first run: correctness + ±0.5 format"),
+    ("jr8dtkxv", "same, 300 steps; its rollouts fed the first filter"),
+    ("dszbz193", "filtered data, group size 4; clipped updates"),
+    ("yvonvoza", "lr 3e-5, grad clip 1.0, all-linear LoRA, + tag_check"),
+    ("zj92jiwi", "+ lenient and exact rewards"),
+    ("9ue7k08w", "Qwen3-0.6B, full reward set"),
+    ("cr6hatom", "Qwen2.5-0.5B, full reward set, no warm-up"),
+    ("xque1787", "SFT hitting NaN at step 30"),
+    ("rylnmvbk", "SFT warm-up (eager attention, fp32 master weights)"),
+    ("6hqxh39p", "RL after SFT"),
+    ("3fjg9zef", "OPD warm-up, Qwen2.5-7B-Instruct teacher"),
+    ("c0uc1sfx", "RL after OPD (bf16, sequence_mask)"),
+    ("6oyljev3", "RL after OPD, token_truncate (runaway)"),
+    ("46in4jdn", "RL after OPD, token_truncate, reduced vLLM memory use"),
+    ("i7yh9cby", "RL after OPD, full fp32"),
+    ("blyv9d73", "fp32, reduced training parallelism"),
+    ("cpgrs28e", "fp32, reduced vLLM memory use"),
+]
+Markdown("| Run | What it was |\n|---|---|\n" + "\n".join(f"| [{r}]({run_url(r)}) | {d} |" for r, d in RUNS))
+```

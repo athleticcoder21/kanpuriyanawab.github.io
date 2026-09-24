@@ -2,3 +2,6 @@
 *.dmg
 _site/posts/assets/*.dmg
 **/_site/**
+/_freeze/site_libs/
+/posts/.env
+/posts/.worklog-venv/
