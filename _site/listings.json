@@ -2,6 +2,8 @@
   {
     "listing": "/writing.html",
     "items": [
+      "/posts/posttraining_gsm8k_worklog.html",
+      "/posts/making_softmax_fast.html",
       "/posts/making_gemv_fast.html",
       "/posts/rlvr.html",
       "/notes/thinking_out_loud.html",
