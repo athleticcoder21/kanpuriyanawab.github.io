@@ -3,5 +3,5 @@
 _site/posts/assets/*.dmg
 **/_site/**
 /_freeze/site_libs/
-/posts/.env
-/posts/.worklog-venv/
+/posts/posttraining_gsm8k_worklog/.env
+/posts/posttraining_gsm8k_worklog/.worklog-venv/

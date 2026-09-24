@@ -1,6 +1,8 @@
 ---
 title: "Worklog: Post training Qwen2.5 for math reasoning"
 # subtitle: "From a flat reward curve to a reward set that works on Qwen3-0.6B, and the Qwen2.5 gap we couldn't close"
+aliases:
+  - /posts/posttraining_gsm8k_worklog.html
 date: 2026-09-24
 format:
   html:
@@ -12,13 +14,13 @@ format:
 execute:
   echo: false
   warning: false
+execute-dir: file
 jupyter: python3
 ---
 
 <!--
-Render from papers/rlvr (charts are pulled from W&B once and cached in worklog_data/):
-    QUARTO_PYTHON=.venv/bin/python quarto render worklog.qmd
-Needs WANDB_API_KEY / WANDB_ENTITY / WANDB_PROJECT in papers/rlvr/.env on the first render.
+Render with setup.sh. Charts are pulled from W&B once and cached in data/.
+Needs WANDB_API_KEY / WANDB_ENTITY / WANDB_PROJECT in .env on the first render.
 -->
 
 ```{python}
@@ -33,7 +35,7 @@ from plotly.subplots import make_subplots
 
 load_dotenv(".env", override=True)
 PROJECT = f"{os.environ.get('WANDB_ENTITY', 'ml-colabs')}/{os.environ.get('WANDB_PROJECT', 'rlvr-gsm8k')}"
-CACHE = Path("worklog_data")
+CACHE = Path("data")
 CACHE.mkdir(exist_ok=True)
 STEP = "train/global_step"
 

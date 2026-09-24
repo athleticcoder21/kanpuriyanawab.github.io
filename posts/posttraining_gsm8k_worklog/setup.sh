@@ -8,20 +8,17 @@
 # What it does:
 #   1. Python env in .worklog-venv (uv if available, else python3 -m venv)
 #   2. Quarto, if `quarto` is not already on PATH (installed under ~/.local)
-#   3. Uses posts/.env for W&B credentials when chart data is missing
-#   4. Downloads missing run histories into posts/worklog_data/ (cached)
-#   5. Renders into _site/posts/posttraining_gsm8k_worklog.html
+#   3. Uses .env for W&B credentials when chart data is missing
+#   4. Downloads missing run histories into data/ (cached)
+#   5. Renders into _site/posts/posttraining_gsm8k_worklog/index.html
 set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "$SCRIPT_DIR/posttraining_gsm8k_worklog.qmd" ]; then
-  POSTS_DIR="$SCRIPT_DIR"
-elif [ -f "$SCRIPT_DIR/../posttraining_gsm8k_worklog.qmd" ]; then
-  POSTS_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-else
-  echo "posttraining_gsm8k_worklog.qmd not found beside setup.sh or one folder above it" >&2
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
+if [ ! -f "$SCRIPT_DIR/index.qmd" ]; then
+  echo "index.qmd not found beside setup.sh" >&2
   exit 1
 fi
-cd "$POSTS_DIR"
+cd "$SCRIPT_DIR"
 
 VENV=.worklog-venv
 PKGS="pandas pyarrow plotly python-dotenv wandb jupyter nbformat nbclient ipykernel"
@@ -69,12 +66,15 @@ if [ ! -f .env ] || ! grep -q '^WANDB_API_KEY=.' .env; then
 fi
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   for p in .env .worklog-venv/; do
-    git check-ignore -q "$p" || { echo "$p" >> .gitignore; echo "==> added $p to .gitignore"; }
+    git -C "$REPO_ROOT" check-ignore -q "posts/posttraining_gsm8k_worklog/$p" || {
+      echo "posts/posttraining_gsm8k_worklog/$p" >> "$REPO_ROOT/.gitignore"
+      echo "==> added posts/posttraining_gsm8k_worklog/$p to .gitignore"
+    }
   done
 fi
 
 # ---- 4. Prefetch the chart data --------------------------------------------
-echo "==> fetching W&B run histories into worklog_data/"
+echo "==> fetching W&B run histories into data/"
 "$PY" - <<'EOF'
 import os, re
 from pathlib import Path
@@ -82,8 +82,8 @@ from dotenv import load_dotenv
 load_dotenv(".env", override=True)
 import pandas as pd, wandb
 project = f"{os.environ.get('WANDB_ENTITY', 'ml-colabs')}/{os.environ.get('WANDB_PROJECT', 'rlvr-gsm8k')}"
-runs = sorted(set(re.findall(r'\("([a-z0-9]{8})",', Path("posttraining_gsm8k_worklog.qmd").read_text())))
-cache = Path("worklog_data"); cache.mkdir(exist_ok=True)
+runs = sorted(set(re.findall(r'\("([a-z0-9]{8})",', Path("index.qmd").read_text())))
+cache = Path("data"); cache.mkdir(exist_ok=True)
 api = wandb.Api()
 for rid in runs:
     f = cache / f"{rid}.parquet"
@@ -97,19 +97,19 @@ EOF
 # ---- 5. Render -------------------------------------------------------------
 case "${1:-}" in
   --no-render)
-    echo "==> done. Render with: QUARTO_PYTHON=$PY $QUARTO render posts/posttraining_gsm8k_worklog.qmd"
+    echo "==> done. Render with: QUARTO_PYTHON=$PY $QUARTO render posts/posttraining_gsm8k_worklog/index.qmd"
     exit 0
     ;;
   --preview)
-    cd ..
-    echo "==> live preview: http://localhost:4321/posts/posttraining_gsm8k_worklog.html"
-    QUARTO_PYTHON="$PY" "$QUARTO" preview posts/posttraining_gsm8k_worklog.qmd --no-browser --port 4321
+    cd "$REPO_ROOT"
+    echo "==> live preview: http://localhost:4321/posts/posttraining_gsm8k_worklog/"
+    QUARTO_PYTHON="$PY" "$QUARTO" preview posts/posttraining_gsm8k_worklog/index.qmd --no-browser --port 4321
     exit $?
     ;;
   "") ;;
   *) echo "usage: $0 [--preview|--no-render]" >&2; exit 2 ;;
 esac
-cd ..
-echo "==> rendering posts/posttraining_gsm8k_worklog.qmd"
-QUARTO_PYTHON="$PY" "$QUARTO" render posts/posttraining_gsm8k_worklog.qmd
-echo "==> done: $(pwd)/_site/posts/posttraining_gsm8k_worklog.html"
+cd "$REPO_ROOT"
+echo "==> rendering posts/posttraining_gsm8k_worklog/index.qmd"
+QUARTO_PYTHON="$PY" "$QUARTO" render posts/posttraining_gsm8k_worklog/index.qmd
+echo "==> done: $(pwd)/_site/posts/posttraining_gsm8k_worklog/index.html"
