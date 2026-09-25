@@ -1,23 +1,18 @@
 #!/bin/bash
-# Set up dependencies and data, then render or live-preview the post (Linux or macOS).
+# Set up the local plotting environment, fetch any missing W&B histories, and
+# render or live-preview this post from the Quarto website.
 #
-#   posts/posttraining_gsm8k_worklog/setup.sh
-#   posts/posttraining_gsm8k_worklog/setup.sh --preview
-#   posts/posttraining_gsm8k_worklog/setup.sh --no-render
+#   bash posts/posttraining_gsm8k_worklog/setup.sh
+#   bash posts/posttraining_gsm8k_worklog/setup.sh --preview
+#   bash posts/posttraining_gsm8k_worklog/setup.sh --no-render
 #
-# What it does:
-#   1. Python env in .worklog-venv (uv if available, else python3 -m venv)
-#   2. Quarto, if `quarto` is not already on PATH (installed under ~/.local)
-#   3. Uses .env for W&B credentials when chart data is missing
-#   4. Downloads missing run histories into data/ (cached)
-#   5. Renders into _site/posts/posttraining_gsm8k_worklog/index.html
+# W&B credentials live in this folder's ignored .env file. Run histories are
+# cached in data/ so later renders do not need to fetch them again.
+# The script installs Python dependencies and Quarto when needed.
 set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
-if [ ! -f "$SCRIPT_DIR/index.qmd" ]; then
-  echo "index.qmd not found beside setup.sh" >&2
-  exit 1
-fi
+[ -f "$SCRIPT_DIR/index.qmd" ] || { echo "index.qmd not found beside setup.sh" >&2; exit 1; }
 cd "$SCRIPT_DIR"
 
 VENV=.worklog-venv
@@ -66,10 +61,7 @@ if [ ! -f .env ] || ! grep -q '^WANDB_API_KEY=.' .env; then
 fi
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   for p in .env .worklog-venv/; do
-    git -C "$REPO_ROOT" check-ignore -q "posts/posttraining_gsm8k_worklog/$p" || {
-      echo "posts/posttraining_gsm8k_worklog/$p" >> "$REPO_ROOT/.gitignore"
-      echo "==> added posts/posttraining_gsm8k_worklog/$p to .gitignore"
-    }
+    git -C "$REPO_ROOT" check-ignore -q "posts/posttraining_gsm8k_worklog/$p" || { echo "posts/posttraining_gsm8k_worklog/$p" >> "$REPO_ROOT/.gitignore"; echo "==> added posts/posttraining_gsm8k_worklog/$p to .gitignore"; }
   done
 fi
 
@@ -89,12 +81,15 @@ for rid in runs:
     f = cache / f"{rid}.parquet"
     if f.exists():
         print(f"   {rid} cached"); continue
-    h = pd.DataFrame(api.run(f"{project}/{rid}").scan_history())
+    run = api.run(f"{project}/{rid}")
+    h = pd.DataFrame(run.scan_history())
+    if run.state == "running":  # don't freeze a live run; the render fetches it again
+        print(f"   {rid} {len(h)} rows (running, not cached)"); continue
     h.to_parquet(f); print(f"   {rid} {len(h)} rows")
 print(f"   {len(runs)} runs from {project}")
 EOF
 
-# ---- 5. Render -------------------------------------------------------------
+# ---- 5. Render or preview ---------------------------------------------------
 case "${1:-}" in
   --no-render)
     echo "==> done. Render with: QUARTO_PYTHON=$PY $QUARTO render posts/posttraining_gsm8k_worklog/index.qmd"

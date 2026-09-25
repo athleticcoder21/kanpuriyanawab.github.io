@@ -41,9 +41,9 @@ STEP = "train/global_step"
 
 # categorical slots in fixed order (validated palette); a reward keeps its color on every chart
 SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
-GRAY = "#8a8984"  # comparison run
+TEST_ACCURACY_COLOR = "#6f42c1"
+GRAY = "#8a8984"  # reference lines and annotations
 INK = "#3d3c38"  # total reward and single-metric panels (blue is reserved for the exact reward)
-SURFACE = "#fcfcfb"
 REWARDS = [  # (reward fn, legend label)
     ("exact_check", "exact (answer + format)"),
     ("correctness_check", "correctness"),
@@ -54,6 +54,12 @@ REWARDS = [  # (reward fn, legend label)
     ("solution_number_check", "answer is a number"),
 ]
 REWARD_COLOR = {fn: SERIES[i] for i, (fn, _) in enumerate(REWARDS)}
+
+
+def _lighten(color, amount=0.48):
+    rgb = [int(color[i:i + 2], 16) for i in (1, 3, 5)]
+    rgb = [round(c + (255 - c) * amount) for c in rgb]
+    return f"rgb({rgb[0]}, {rgb[1]}, {rgb[2]})"
 
 
 def history(run_id: str) -> pd.DataFrame:
@@ -93,7 +99,7 @@ def _style(fig, title, height, legend_y=-0.08, bottom=20):
     return fig
 
 
-def line(series, title, ytitle, smooth=1, log_y=False, hline=None, max_step=None, markers=False):
+def line(series, title, ytitle, smooth=1, log_y=False, hline=None, max_step=None):
     """One chart, several runs. series: list of (run_id, metric, label)."""
     fig = go.Figure()
     for i, (run_id, key, label) in enumerate(series):
@@ -101,12 +107,12 @@ def line(series, title, ytitle, smooth=1, log_y=False, hline=None, max_step=None
         if xy is None:
             continue
         fig.add_trace(go.Scatter(
-            x=xy[0], y=xy[1], name=label, mode="lines+markers" if markers else "lines",
-            line=dict(width=2, color=SERIES[i]), marker=dict(size=8, line=dict(color=SURFACE, width=2)),
-            hovertemplate=f"{label}: %{{y:.4f}}<extra>{run_id}</extra>",
+            x=xy[0], y=xy[1], name=label, mode="lines",
+            line=dict(width=2, color=SERIES[i]),
+            hovertemplate=f"{label}: %{{y:.4f}}<extra></extra>",
         ))
     if hline is not None:
-        fig.add_hline(y=hline[0], line_dash="dot", line_color=GRAY, annotation_text=hline[1], annotation_position="top left")
+        fig.add_hline(y=hline[0], line_dash="solid", line_color=GRAY, annotation_text=hline[1], annotation_position="top left")
     _style(fig, title, 440, legend_y=-0.2, bottom=60)
     fig.update_xaxes(title_text="training step")
     fig.update_yaxes(title_text=ytitle, type="log" if log_y else None, dtick=1 if log_y else None)
@@ -114,45 +120,45 @@ def line(series, title, ytitle, smooth=1, log_y=False, hline=None, max_step=None
 
 
 def run_grid(run_id, label, compare=None, smooth=10):
-    """3x3 dashboard for one GRPO run. compare = (run_id, label) drawn in gray on a few panels."""
+    """3x3 dashboard for one GRPO run. compare = (run_id, label) drawn in a contrasting color on a few panels."""
     h = history(run_id)
     hc = history(compare[0]) if compare else None
     titles = [
-        "Total reward (line: train, ◆: test)", "Each reward (line: train, ◆: test)", "Accuracy (line: train, ◆: test)",
+        "Total reward (train + test)", "Each reward (train + test)", "Accuracy (train + test)",
         "Groups with no signal (reward std = 0)", "Completion length (tokens)", "Entropy",
         "Gradient norm", "Importance-sampling ratio", "vLLM vs trainer |Δ log p| (nats/token)",
     ]
     fig = make_subplots(rows=3, cols=3, subplot_titles=titles, horizontal_spacing=0.07, vertical_spacing=0.11)
 
-    def add(r, c, xy, name, color, legend=False, group=None, dash=None, points=False):
+    def add(r, c, xy, name, color, legend=False, group=None, width=2):
         if xy is None:
             return
         fig.add_trace(go.Scatter(
             x=xy[0], y=xy[1], name=name, legendgroup=group or name, showlegend=legend,
-            mode="markers" if points else "lines", line=dict(color=color, width=2, dash=dash),
-            marker=dict(color=color, size=10, symbol="diamond", line=dict(color=SURFACE, width=2)),
+            mode="lines", line=dict(color=color, width=width),
             hovertemplate=f"{name}: %{{y:.3f}}<extra></extra>",
         ), row=r, col=c)
 
     add(1, 1, _xy(h, "train/reward", smooth), "total reward", INK)
-    add(1, 1, _xy(h, "eval/reward"), "total reward (test)", INK, group="total reward", points=True)
+    add(1, 1, _xy(h, "eval/reward"), "total reward (test)", _lighten(INK), group="total reward")
     for fn, lab in REWARDS:
         add(1, 2, _xy(h, f"train/rewards/{fn}/mean", smooth), lab, REWARD_COLOR[fn], legend=f"train/rewards/{fn}/mean" in h, group=fn)
-        add(1, 2, _xy(h, f"eval/rewards/{fn}/mean"), f"{lab} (test)", REWARD_COLOR[fn], group=fn, points=True)
+        add(1, 2, _xy(h, f"eval/rewards/{fn}/mean"), f"{lab} (test)", _lighten(REWARD_COLOR[fn]), group=fn)
     for fn in ("correctness_check", "exact_check"):
         lab = dict(REWARDS)[fn]
         add(1, 3, _xy(h, f"train/rewards/{fn}/mean", smooth), lab, REWARD_COLOR[fn], group=fn)
-        add(1, 3, _xy(h, f"eval/rewards/{fn}/mean"), f"{lab} (test)", REWARD_COLOR[fn], group=fn, points=True)
+    add(1, 3, _xy(h, "eval/rewards/exact_check/mean"), "exact accuracy (test)", TEST_ACCURACY_COLOR,
+        legend=True, group="exact_check", width=3)
     for (r, c), key in {(2, 1): "train/frac_reward_zero_std", (2, 2): "train/completions/mean_length", (2, 3): "train/entropy",
                         (3, 1): "train/grad_norm", (3, 2): "train/sampling/importance_sampling_ratio/mean",
                         (3, 3): "train/sampling/sampling_logp_difference/mean"}.items():
         add(r, c, _xy(h, key, smooth), titles[(r - 1) * 3 + c - 1], INK)
     if hc is not None:
         cl, last = compare[1], h[STEP].max()  # clip the comparison run to this run's length
-        add(1, 1, _xy(hc, "train/reward", smooth, last), f"gray: {cl}", GRAY, legend=True, group="compare", dash="dot")
-        add(1, 3, _xy(hc, "train/rewards/correctness_check/mean", smooth, last), f"{cl}: correctness", GRAY, group="compare", dash="dot")
-        add(3, 2, _xy(hc, "train/sampling/importance_sampling_ratio/mean", smooth, last), f"{cl}: IS ratio", GRAY, group="compare", dash="dot")
-        add(3, 3, _xy(hc, "train/sampling/sampling_logp_difference/mean", smooth, last), f"{cl}: |Δ log p|", GRAY, group="compare", dash="dot")
+        add(1, 1, _xy(hc, "train/reward", smooth, last), f"{cl}", SERIES[-1], legend=True, group="compare")
+        add(1, 3, _xy(hc, "train/rewards/correctness_check/mean", smooth, last), f"{cl}: correctness", SERIES[-1], group="compare")
+        add(3, 2, _xy(hc, "train/sampling/importance_sampling_ratio/mean", smooth, last), f"{cl}: IS ratio", SERIES[-1], group="compare")
+        add(3, 3, _xy(hc, "train/sampling/sampling_logp_difference/mean", smooth, last), f"{cl}: |Δ log p|", SERIES[-1], group="compare")
     d = _xy(h, "train/sampling/sampling_logp_difference/mean")
     if d is not None and d[1].max() > 1:
         fig.update_yaxes(type="log", dtick=1, row=3, col=3)  # ticks at powers of ten
@@ -171,9 +177,9 @@ def aux_grid(runs, metrics, title, smooth=1):
             if xy is None:
                 continue
             fig.add_trace(go.Scatter(
-                x=xy[0], y=xy[1], name=lab, legendgroup=lab, showlegend=j == 0, mode="lines+markers",
-                line=dict(color=SERIES[i], width=2), marker=dict(size=6, color=SERIES[i]),
-                hovertemplate=f"{lab}: %{{y:.4f}}<extra>{run_id}</extra>",
+                x=xy[0], y=xy[1], name=lab, legendgroup=lab, showlegend=j == 0, mode="lines",
+                line=dict(color=SERIES[i], width=2),
+                hovertemplate=f"{lab}: %{{y:.4f}}<extra></extra>",
             ), row=1, col=j + 1)
     _style(fig, title, 400, legend_y=-0.3, bottom=70)
     fig.update_xaxes(title_text="step")
@@ -271,7 +277,7 @@ than half of those right answers land where a parser can find them. Less than ha
 ## Getting the first run to train at all
 
 The cookbook is written for a single consumer GPU, so it loads the model in
-4-bit and lets `device_map="auto"` place it. I was on a node with 8 H100s, and
+4-bit and lets `device_map="auto"` place it. I was on a node with 8×A100s, and
 my very first run crashed before step 1:
 
 ```text
@@ -283,7 +289,7 @@ Qwen's whole 152k-token vocabulary, for every token of every completion. With
 completions allowed up to 2,048 tokens and 8 of them per GPU, that one tensor
 is huge. GSM8K answers are about 200 tokens long, so I cut the limit to 512.
 
-I also dropped 4-bit (at 0.5B parameters it buys nothing on an H100) and
+I also dropped 4-bit (at 0.5B parameters it buys nothing on an A100) and
 `device_map="auto"`, which fights `accelerate` when you want one copy of the
 model per GPU. The final setup: vLLM on GPU 0 generating the rollouts, the
 other 7 GPUs training, LoRA on the cookbook's `q_proj` and `v_proj`, and the
@@ -309,7 +315,7 @@ samples per question, for 300 steps. And... nothing.
 
 ```{python}
 #| label: fig-jr8dtkxv
-#| fig-cap: "jr8dtkxv, correctness + format on all 7,473 training questions (10-step rolling mean)."
+#| fig-cap: "[jr8dtkxv](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/jr8dtkxv), correctness + format on all 7,473 training questions (10-step rolling mean)."
 run_grid("jr8dtkxv", "Naive rewards, full training set")
 ```
 
@@ -366,15 +372,15 @@ signal if some answers followed the format and others didn't.
 
 If most questions teach nothing, why train on them? I wrote a script that
 downloads a run's rollout tables from W&B, groups them per question, and
-drops the questions that came out 0/8 or 8/8. jr8dtkxv had seen 2,100
-questions: 1,206 were all-wrong and 1 all-right, so 1,207 went out. I also
+drops the questions that came out 0/8 or 8/8. [jr8dtkxv](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/jr8dtkxv) had seen
+2,100 questions: 1,206 were all-wrong and 1 all-right, so 1,207 went out. I also
 cut the group size from 8 to 4, to cover more questions per step, and
 launched [dszbz193](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/dszbz193).
 
 ```{python}
 #| label: fig-dszbz193
-#| fig-cap: "dszbz193, same rewards, 0/8 and 8/8 questions from jr8dtkxv removed, group size 4. Gray: jr8dtkxv."
-run_grid("dszbz193", "Filtered from jr8dtkxv's rollouts", compare=("jr8dtkxv", "jr8dtkxv"))
+#| fig-cap: "[dszbz193](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/dszbz193), same rewards, 0/8 and 8/8 questions from [jr8dtkxv](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/jr8dtkxv) removed, group size 4. Comparison: [jr8dtkxv](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/jr8dtkxv)."
+run_grid("dszbz193", "Filtered rollouts", compare=("jr8dtkxv", "first run"))
 ```
 
 Flat again. Correctness went from 10.9% to 10.8%, test correctness stayed at
@@ -382,7 +388,7 @@ Flat again. Correctness went from 10.9% to 10.8%, test correctness stayed at
 
 ```{python}
 #| label: fig-gradclip
-#| fig-cap: "dszbz193: the gradient norm sits above the 0.1 clip threshold on 79% of steps, so nearly every update was scaled down."
+#| fig-cap: "[dszbz193](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/dszbz193): the gradient norm sits above the 0.1 clip threshold on 79% of steps, so nearly every update was scaled down."
 line([("dszbz193", "train/grad_norm", "gradient norm")], "Gradient norm vs. the clip threshold", "grad norm",
      smooth=5, hline=(0.1, "max_grad_norm = 0.1"))
 ```
@@ -435,8 +441,8 @@ That was [iql9rc9t](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/iql9rc9t).
 
 ```{python}
 #| label: fig-iql9rc9t
-#| fig-cap: "iql9rc9t, presample-filtered data (4,097 questions), five rewards, fixed optimizer. Gray: dszbz193."
-run_grid("iql9rc9t", "Presampled data + partial rewards", compare=("dszbz193", "dszbz193"))
+#| fig-cap: "[iql9rc9t](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/iql9rc9t), presample-filtered data (4,097 questions), five rewards, fixed optimizer. Comparison: [dszbz193](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/dszbz193)."
+run_grid("iql9rc9t", "Presampled data + partial rewards", compare=("dszbz193", "filtered run"))
 ```
 
 The total reward went up (0.75 to 0.90), but mostly from the partial rewards.
@@ -493,8 +499,8 @@ by its name, not its code, so my edit never took effect. One
 
 ```{python}
 #| label: fig-cr6hatom
-#| fig-cap: "cr6hatom, all seven rewards on Qwen2.5-0.5B, 5,380 presampled questions. Gray: iql9rc9t."
-run_grid("cr6hatom", "Qwen2.5-0.5B, full reward set", compare=("iql9rc9t", "iql9rc9t"))
+#| fig-cap: "[cr6hatom](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/cr6hatom), all seven rewards on Qwen2.5-0.5B, 5,380 presampled questions. Comparison: [iql9rc9t](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/iql9rc9t)."
+run_grid("cr6hatom", "Qwen2.5-0.5B, full reward set", compare=("iql9rc9t", "partial rewards"))
 ```
 
 Reward 1.18 to 1.25. Test exact accuracy **5.6% to 6.3%** over 444 steps.
@@ -513,8 +519,8 @@ this comparison too.
 
 ```{python}
 #| label: fig-9ue7k08w
-#| fig-cap: "9ue7k08w, Qwen3-0.6B with the identical recipe. Gray: cr6hatom (Qwen2.5-0.5B)."
-run_grid("9ue7k08w", "Qwen3-0.6B, same recipe", compare=("cr6hatom", "Qwen2.5-0.5B (cr6hatom)"))
+#| fig-cap: "[9ue7k08w](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/9ue7k08w), Qwen3-0.6B with the identical recipe. Comparison: [cr6hatom](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/cr6hatom) (Qwen2.5-0.5B)."
+run_grid("9ue7k08w", "Qwen3-0.6B, same recipe", compare=("cr6hatom", "Qwen2.5-0.5B"))
 ```
 
 And it just... worked. Reward climbed from 3.47 to 4.45 out of 5.25. Exact
@@ -544,7 +550,7 @@ every single weight was `NaN`:
 
 ```{python}
 #| label: fig-sft
-#| fig-cap: "SFT: the first run went NaN and trained on garbage until the end; the second was stopped by a NaN guard at step 30; the third (eager attention, fp32 master weights) is clean."
+#| fig-cap: "SFT: [cazlulmo](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/cazlulmo) went NaN; [xque1787](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/xque1787) stopped at step 30; [rylnmvbk](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/rylnmvbk) is clean with eager attention and fp32 master weights."
 fig = aux_grid(
     [("cazlulmo", "1st: bf16 weights, SDPA"), ("xque1787", "2nd: fp32 weights, SDPA (NaN guard)"),
      ("rylnmvbk", "3rd: fp32 weights, eager attention")],
@@ -571,8 +577,8 @@ the 2,093 SFT questions, leaving 4,380 for RL. Then
 
 ```{python}
 #| label: fig-6hqxh39p
-#| fig-cap: "6hqxh39p, RL after the SFT warm-up. Gray: cr6hatom (no warm-up)."
-run_grid("6hqxh39p", "RL after SFT warm-up", compare=("cr6hatom", "no warm-up (cr6hatom)"))
+#| fig-cap: "[6hqxh39p](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/6hqxh39p), RL after the SFT warm-up. Comparison: [cr6hatom](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/cr6hatom) (no warm-up)."
+run_grid("6hqxh39p", "RL after SFT warm-up", compare=("cr6hatom", "no warm-up"))
 ```
 
 Immediate jump. The reward started at 3.0 instead of 1.2, and format was
@@ -604,7 +610,7 @@ Same 2,093 questions as the SFT,
 
 ```{python}
 #| label: fig-opd
-#| fig-cap: "3fjg9zef, OPD warm-up: reverse KL to Qwen2.5-7B-Instruct on the student's own samples."
+#| fig-cap: "[3fjg9zef](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/3fjg9zef), OPD warm-up: reverse KL to Qwen2.5-7B-Instruct on the student's own samples."
 aux_grid(
     [("3fjg9zef", "OPD, teacher Qwen2.5-7B-Instruct")],
     [("train/loss", "Loss (reverse KL)"), ("train/grad_norm", "Gradient norm"),
@@ -619,8 +625,8 @@ for RL. [c0uc1sfx](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/c0uc1sfx):
 
 ```{python}
 #| label: fig-c0uc1sfx
-#| fig-cap: "c0uc1sfx, RL after the OPD warm-up, 804 steps. Gray: 6hqxh39p (SFT warm-up)."
-run_grid("c0uc1sfx", "RL after OPD warm-up", compare=("6hqxh39p", "SFT warm-up (6hqxh39p)"))
+#| fig-cap: "[c0uc1sfx](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/c0uc1sfx), RL after the OPD warm-up, 804 steps. Comparison: [6hqxh39p](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/6hqxh39p) (SFT warm-up)."
+run_grid("c0uc1sfx", "RL after OPD warm-up", compare=("6hqxh39p", "SFT warm-up"))
 ```
 
 More gains: exact accuracy on training batches around 57–59%, and **40.8% on
@@ -636,7 +642,7 @@ line(
      ("cr6hatom", "eval/accuracy_exact", "Qwen2.5, no warm-up"),
      ("6hqxh39p", "eval/accuracy_exact", "Qwen2.5, SFT warm-up"),
      ("c0uc1sfx", "eval/accuracy_exact", "Qwen2.5, OPD warm-up")],
-    "Test exact accuracy (right answer, exact format)", "accuracy", markers=True,
+    "Test exact accuracy (right answer, exact format)", "accuracy",
 )
 ```
 
@@ -687,18 +693,18 @@ Once I knew what to look for, it was everywhere:
 #| label: fig-isr
 #| fig-cap: "Importance-sampling ratio in every run so far (10-step rolling mean). Qwen3 starts at 1.0 and stays above 0.6; every Qwen2.5 run falls to 0.3–0.55."
 line(
-    [("9ue7k08w", "train/sampling/importance_sampling_ratio/mean", "Qwen3-0.6B (9ue7k08w)"),
-     ("jr8dtkxv", "train/sampling/importance_sampling_ratio/mean", "naive rewards (jr8dtkxv)"),
-     ("dszbz193", "train/sampling/importance_sampling_ratio/mean", "filtered (dszbz193)"),
-     ("iql9rc9t", "train/sampling/importance_sampling_ratio/mean", "presampled + partial (iql9rc9t)"),
-     ("cr6hatom", "train/sampling/importance_sampling_ratio/mean", "full reward set (cr6hatom)"),
-     ("6hqxh39p", "train/sampling/importance_sampling_ratio/mean", "SFT warm-up (6hqxh39p)"),
-     ("c0uc1sfx", "train/sampling/importance_sampling_ratio/mean", "OPD warm-up (c0uc1sfx)")],
+    [("9ue7k08w", "train/sampling/importance_sampling_ratio/mean", "Qwen3-0.6B"),
+     ("jr8dtkxv", "train/sampling/importance_sampling_ratio/mean", "naive rewards"),
+     ("dszbz193", "train/sampling/importance_sampling_ratio/mean", "filtered"),
+     ("iql9rc9t", "train/sampling/importance_sampling_ratio/mean", "presampled + partial"),
+     ("cr6hatom", "train/sampling/importance_sampling_ratio/mean", "full reward set"),
+     ("6hqxh39p", "train/sampling/importance_sampling_ratio/mean", "SFT warm-up"),
+     ("c0uc1sfx", "train/sampling/importance_sampling_ratio/mean", "OPD warm-up")],
     "vLLM importance-sampling ratio", "mean ratio", smooth=10,
 )
 ```
 
-It had been there since jr8dtkxv (0.92 falling to 0.36). Qwen3 started at
+It had been there since [jr8dtkxv](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/jr8dtkxv) (0.92 falling to 0.36). Qwen3 started at
 1.0 and never went below 0.6. Every Qwen2.5 run fell to somewhere between 0.3
 and 0.55, most of them within the first 100 steps.
 
@@ -735,8 +741,8 @@ ratio, capped at 3, instead of dropping entire completions.
 
 ```{python}
 #| label: fig-6oyljev3
-#| fig-cap: "6oyljev3, token_truncate. The ratio reads near 1, but the vLLM–trainer mismatch compounds (log scale). Gray: c0uc1sfx (sequence_mask)."
-run_grid("6oyljev3", "token_truncate instead of sequence_mask", compare=("c0uc1sfx", "sequence_mask (c0uc1sfx)"))
+#| fig-cap: "[6oyljev3](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/6oyljev3), token_truncate. The ratio reads near 1, but the vLLM–trainer mismatch compounds (log scale). Comparison: [c0uc1sfx](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/c0uc1sfx) (sequence_mask)."
+run_grid("6oyljev3", "token_truncate instead of sequence_mask", compare=("c0uc1sfx", "sequence_mask"))
 ```
 
 For about 80 steps the ratio sat near 1, very stable, unlike any run
@@ -767,8 +773,8 @@ buffer the size of the whole model on top of that. The sync still returned
 
 ```{python}
 #| label: fig-46in4jdn
-#| fig-cap: "46in4jdn, same as 6oyljev3 but vLLM at 50% of GPU memory. Same runaway. Gray: 6oyljev3."
-run_grid("46in4jdn", "token_truncate, vLLM at 50% GPU memory", compare=("6oyljev3", "vLLM at 90% (6oyljev3)"))
+#| fig-cap: "[46in4jdn](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/46in4jdn), same as [6oyljev3](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/6oyljev3) but vLLM at 50% of GPU memory. Same runaway. Comparison: [6oyljev3](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/6oyljev3)."
+run_grid("46in4jdn", "token_truncate, vLLM at 50% GPU memory", compare=("6oyljev3", "vLLM at 90%"))
 ```
 
 Same story: stable for about 100 steps, then the mismatch ran away to 4.9.
@@ -797,8 +803,8 @@ So I ran the whole thing in fp32, trainer and vLLM both, and went back to
 
 ```{python}
 #| label: fig-i7yh9cby
-#| fig-cap: "i7yh9cby, same OPD model, everything in fp32. Gray: c0uc1sfx (bf16)."
-run_grid("i7yh9cby", "RL after OPD warm-up, fp32 end to end", compare=("c0uc1sfx", "bf16 (c0uc1sfx)"))
+#| fig-cap: "[i7yh9cby](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/i7yh9cby), same OPD model, everything in fp32. Comparison: [c0uc1sfx](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/c0uc1sfx) (bf16)."
+run_grid("i7yh9cby", "RL after OPD warm-up, fp32 end to end", compare=("c0uc1sfx", "bf16"))
 ```
 
 The start was much better, because the OPD model finally ran the way it was
@@ -815,10 +821,10 @@ should be identical:
 #| fig-cap: "First 20 steps, vLLM vs trainer mismatch. In fp32, Qwen2.5 starts at 0.0006, so the two copies are identical, then gains about 0.003 every step. Qwen3 (bf16) stays flat."
 line(
     [("9ue7k08w", "train/sampling/sampling_logp_difference/mean", "Qwen3-0.6B, bf16, 7 GPUs"),
-     ("i7yh9cby", "train/sampling/sampling_logp_difference/mean", "Qwen2.5 fp32, 7 GPUs (i7yh9cby)"),
-     ("blyv9d73", "train/sampling/sampling_logp_difference/mean", "Qwen2.5 fp32, 1 GPU (blyv9d73)"),
-     ("cpgrs28e", "train/sampling/sampling_logp_difference/mean", "Qwen2.5 fp32, 1 GPU, vLLM at 25% (cpgrs28e)")],
-    "Mismatch over the first steps", "nats per token", max_step=20, markers=True,
+     ("i7yh9cby", "train/sampling/sampling_logp_difference/mean", "Qwen2.5 fp32, 7 GPUs"),
+     ("blyv9d73", "train/sampling/sampling_logp_difference/mean", "Qwen2.5 fp32, 1 GPU"),
+     ("cpgrs28e", "train/sampling/sampling_logp_difference/mean", "Qwen2.5 fp32, 1 GPU, vLLM at 25%")],
+    "Mismatch over the first steps", "nats per token", max_step=20,
 )
 ```
 
@@ -828,7 +834,7 @@ perfectly. Then it grew by about 0.003 with every step: 0.006, 0.009, 0.012,
 
 A mismatch that starts at zero and grows with every update means the two
 copies stop agreeing *because of training*. So I took the adapter checkpoints
-i7yh9cby had saved and tested every piece of the weight sync on its own, in
+[i7yh9cby](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/i7yh9cby) had saved and tested every piece of the weight sync on its own, in
 fp32:
 
 | Test | vLLM vs correct model (nats/token) |
@@ -850,31 +856,690 @@ Every piece checked out. So I tried the things only the live run has:
   ([cpgrs28e](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/cpgrs28e)). Still grew:
   0.0006 to about 0.02 in 20 steps.
 
+## Taking vLLM out of the loop
+
+Every piece of the sync checked out on its own, and the live loop still
+drifted. So the next morning I tried the simplest possible test: get rid of
+the second copy. TRL can also generate the rollouts with the training model
+itself, using plain Hugging Face `generate`. Slower, but there is only one
+copy of the policy, so nothing to sync, nothing to drift, and no
+importance-sampling correction at all. Same SFT checkpoint and same data as
+[6hqxh39p](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/6hqxh39p), temperature
+1.0, fp32.
+
+My first attempt,
+[gv11dzpk](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/gv11dzpk), I killed
+after 23 steps. It looked the same as before, so I decided vLLM wasn't the
+problem after all. That was a bad call. 23 steps at 16 questions a step is
+noise, and it hadn't even reached its first test evaluation. So I ran it
+properly: [gdi2sbor](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/gdi2sbor).
+
+```{python}
+#| label: fig-gdi2sbor
+#| fig-cap: "[gdi2sbor](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/gdi2sbor), SFT warm-up + RL with rollouts from the training model itself (no vLLM). Comparison: [6hqxh39p](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/6hqxh39p), same start and data with vLLM."
+run_grid("gdi2sbor", "SFT warm-up, RL without vLLM", compare=("6hqxh39p", "with vLLM"))
+```
+
+And there it was. **For the first time in this whole worklog, RL itself was
+moving Qwen2.5.** Exact accuracy on training batches climbed from 46% to
+73%, and on the test set:
+
+```{python}
+#| label: fig-novllm-eval
+#| fig-cap: "Test exact accuracy from the same SFT checkpoint: flat with vLLM, climbing without it."
+line(
+    [("gdi2sbor", "eval/accuracy_exact", "without vLLM"),
+     ("6hqxh39p", "eval/accuracy_exact", "with vLLM")],
+    "Test exact accuracy, same SFT start", "accuracy",
+)
+```
+
+**36.5% at step 100 and 42.2% at step 200**, against a flat 22.8% → 22.5%
+with vLLM. Same checkpoint, same data, same rewards. The only difference was
+where the rollouts came from.
+
+It wasn't free, though. The first test evaluation took forever: 1,319
+questions × 8 samples, generated 8 at a time, is about 165 `generate` calls
+per GPU. I raised the eval batch to 64 per GPU (same metric, about 21 calls)
+and turned on TF32 matmuls for fp32 runs without vLLM (no second copy to
+disagree with anymore).
+
+## So what's wrong with my vLLM setup?
+
+TRL's vLLM server mode is used by a lot of people, so a drift this steady
+smelled like something in *my* setup. I went through TRL's source: which
+model gets synced (the right one), when (before every generation, every
+step), with what names (the right ones), and with what sampling settings
+(`top_k=0` and `top_p=1`, so no truncation bias). All fine.
+
+Two things stood out, though. First, Qwen3's mismatch had grown too, from
+0.012 to 0.029 over its run. It just hid under bf16 noise early on. So it's
+not a Qwen2.5 bug. Qwen2.5 just has less room for it.
+
+Second, **LoRA plus vLLM server mode means that at every sync, TRL merges the
+adapter into the base weights, ships the whole model over NCCL, and unmerges
+it.** Hundreds of times per run. That's the exact pattern in
+[TRL #6688](https://github.com/huggingface/trl/issues/6688), where runs
+generating with Hugging Face and with vLLM diverge after the first epoch on bf16
+LoRA.
+
+TRL later added an adapter-only sync: send the adapter to vLLM without merging
+it into the base model ([PR #7017](https://github.com/huggingface/trl/pull/7017)).
+In a 500-step test, the trainer and vLLM stayed very close, with their ratio
+between 0.9998 and 1.0. That was a useful clue, but not a fix I could turn on:
+the new path was only in the experimental `AsyncGRPOTrainer`, and it landed
+after the TRL version I was using. Switching trainers would have changed my
+setup instead of explaining what was wrong with its sync. It also didn't
+explain my fp32 run, where merging is exact.
+
+So I kept the same trainer and tested full fine-tuning with vLLM. With no
+adapter to merge, it would tell me whether the drift was specific to the LoRA
+sync.
+
+## All bf16: SFT, then OPD, then RL
+
+With RL finally working, I wanted to squeeze the most out of the model. The
+plan was a bit of a yolo run: SFT for the format, OPD on top for correctness,
+then RL without vLLM, **all in bf16**. After the OPD checkpoint that hated being
+converted to bf16, I wanted checkpoints that are trained in the same precision
+they run in.
+
+While OPD was running, I got worried about the order. My teacher, the 7B, only
+gets 77% of its answers in exact format. OPD pulls the student toward the
+teacher, format habits included, so OPD after SFT could undo some of the
+format SFT had just taught. I kept the order anyway. In my earlier OPD run,
+Qwen2.5-0.5B was the student and Qwen2.5-7B-Instruct was the teacher. After
+OPD, the student reached around 90% format, even though the teacher was at
+77%. RL now fixes the remaining format errors in no time.
+
+The bigger surprise was somewhere else. Here are the SFT
+([idj5wrml](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/idj5wrml)) and OPD
+([ht3y144u](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/ht3y144u)) runs next
+to their fp32 versions from before:
+
+```{python}
+#| label: fig-bf16-warmups
+#| fig-cap: "Warm-ups trained with bf16 weights learn much less than with fp32 master weights. SFT: [rylnmvbk](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/rylnmvbk) vs [idj5wrml](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/idj5wrml); OPD: [3fjg9zef](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/3fjg9zef) vs [ht3y144u](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/ht3y144u)."
+fig = aux_grid(
+    [("rylnmvbk", "SFT, fp32 master weights"), ("idj5wrml", "SFT, bf16 weights"),
+     ("3fjg9zef", "OPD, fp32 (from base)"), ("ht3y144u", "OPD, bf16 (from bf16 SFT)")],
+    [("train/loss", "Loss"), ("train/grad_norm", "Gradient norm"), ("train/entropy", "Entropy")],
+    "Warm-ups: fp32 master weights vs bf16 weights",
+)
+fig
+```
+
+The bf16 SFT loss only got from 0.61 to **0.48**; in fp32 it went to **0.27**.
+bf16 stores weights with 8 bits of precision, so neighbouring values of a weight are
+about 0.8% apart. One Adam step at a learning rate of 1e-5 (or OPD's 2e-6) is much
+smaller than that, so most updates round straight back to the old value.
+I had used bf16 for the trainable weights too, because I wanted the
+checkpoints to be trained in the same precision they'd run in. That was the
+mistake: the optimizer had no fp32 copy to preserve those small updates. I
+could have kept fp32 master weights and still used bf16 for the matmuls.
+
+::: {.callout-note title="Quick reminder: mixed precision" collapse="true"}
+
+There are two setups that often get called mixed precision:
+
+- **Autocast:** parameters stay in fp32. PyTorch runs selected operations,
+  like matrix multiplies, in bf16 and keeps others in fp32. The optimizer
+  updates the fp32 parameters, so those are already the master weights. No
+  second copy is needed. [PyTorch's AMP docs](https://docs.pytorch.org/docs/stable/amp.html)
+- **Bf16 weights:** parameters themselves are stored in bf16. If the optimizer
+  updates those directly, each update is rounded back to bf16. To preserve
+  smaller updates, keep fp32 master weights and use bf16 for computation.
+
+I used bf16 weights for these warm-ups, so I don't think I kept fp32 master
+weights. Adam's fp32 optimizer state, if present, is separate; it doesn't keep
+an fp32 copy of the parameters.
+
+:::
+
+The presample confirmed it: 1,660 questions 0/8 and 306 8/8. That's about
+where the SFT-only model was (1,705 and 274), nowhere near the fp32 OPD model
+(861 and 1,497). Lesson learned: bf16 for the matmuls is fine, but keep fp32
+master weights.
+
+
+### Entropy collapse
+
+RL on top of it, [6rr1hcot](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/6rr1hcot),
+took off immediately. Within 15 steps the reward was at 4, and exact accuracy on
+training batches went from 54% to 74% in 50 steps. But look at the entropy:
+
+```{python}
+#| label: fig-6rr1hcot
+#| fig-cap: "[6rr1hcot](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/6rr1hcot), RL on the bf16 SFT+OPD model, without vLLM. Comparison: [gdi2sbor](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/gdi2sbor)."
+run_grid("6rr1hcot", "RL after bf16 SFT + OPD", compare=("gdi2sbor", "SFT only"))
+```
+
+0.42 at step 1, 0.26 at step 11, **0.11 by step 41**. The model was getting
+very sure of itself very fast, and I stopped the run at step 50. A model that
+confident stops exploring. Every group turns into eight copies of the same
+answer, and from there on RL only sharpens what it already does. Looking
+back, [gdi2sbor](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/gdi2sbor) had the same problem, just slower: its entropy went from 0.33
+to 0.10 over 200 steps.
+
+```{python}
+#| label: fig-entropy
+#| fig-cap: "Entropy during RL without vLLM: both runs collapse, the bf16 SFT+OPD one in a quarter of the steps."
+line(
+    [("gdi2sbor", "train/entropy", "SFT warm-up"),
+     ("6rr1hcot", "train/entropy", "bf16 SFT + OPD warm-up")],
+    "Entropy (nats/token)", "entropy", smooth=5,
+)
+```
+
+### Fighting the collapse
+
+TRL 1.13 has a few levers for this, and I switched on three of them for the
+next run, [75nd1lv5](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/75nd1lv5):
+
+- **Adaptive entropy bonus** (from Skywork-OR1), with a target of 0.30. Whenever
+  entropy drops below the target, an entropy bonus gets turned up a little each
+  step, and it backs off once entropy recovers.
+- **Clip-higher** (from DAPO): each batch gets two updates instead of one, so
+  PPO's clipping finally does something (remember the clip ratio that was
+  always 0), with a looser upper bound (0.28) so unlikely tokens can gain
+  probability faster.
+- **A lower learning rate**, 1e-5 instead of 3e-5, because starting from a
+  strong checkpoint, 3e-5 moves fast enough to collapse quickly.
+
+A KL penalty back to the starting model is in reserve if that's not enough.
+
+```{python}
+#| label: fig-75nd1lv5
+#| fig-cap: "[75nd1lv5](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/75nd1lv5), same model and data as [6rr1hcot](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/6rr1hcot), with the adaptive entropy bonus, clip-higher (two updates per batch) and lr 1e-5. Comparison: [6rr1hcot](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/6rr1hcot) (no levers)."
+run_grid("75nd1lv5", "bf16 SFT + OPD + RL, entropy levers on", compare=("6rr1hcot", "no levers"))
+```
+
+Well, the entropy part worked. It dipped to 0.25 around step 35, the bonus
+kicked in, and it climbed back to 0.34 and stayed there. But that was the
+only thing that worked. Exact accuracy on training batches went from 50% to
+about 61% in the first 30 steps, sat there, and then slid back to 52% by step
+100. [6rr1hcot](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/6rr1hcot), with no levers, had gone from 54% to 74% in 50 steps. And the
+clip ratio, the whole reason for doing two updates per batch, stayed at
+exactly 0 for the entire run. So I paid for twice the compute, and the
+clipping never happened.
+
+I stopped it at step 100 and took all three levers out again. A model that
+explores and doesn't learn is worse than one that collapses and learns. The
+collapse is still a problem, I just need a better way to fight it.
+
+Also, by now the runs without vLLM were getting painful: 10 to 16 seconds a
+step, against about 4 with vLLM. If I wanted to try more things, and one long
+yolo run at the end, I needed the fast path back. So it was time to go back to
+the question I had parked: why does RL through vLLM not work?
+
+## Back to vLLM
+
+### Full fine-tuning with vLLM
+
+The test I had parked was full fine-tuning with vLLM. No LoRA means no merge
+and unmerge at every sync: the trainer just ships its actual weights. If the
+drift goes away, the merge is the problem. If it stays, it's something else in
+the loop.
+
+I ran the full fine-tuning test as
+[7re5fbb2](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/7re5fbb2): fp32, lr
+1e-6, with the same fp32 OPD model and data as
+[i7yh9cby](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/i7yh9cby). Twenty steps
+were enough. By then, the mismatch in [i7yh9cby](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/i7yh9cby)
+had already grown to 60 times its starting value.
+
+```{python}
+#| label: fig-fullft
+#| fig-cap: "TRL’s `sampling_logp_difference/mean` on the same fp32 OPD model and data: LoRA ([i7yh9cby](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/i7yh9cby)) against full fine-tuning ([7re5fbb2](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/7re5fbb2))."
+line(
+    [("i7yh9cby", "train/sampling/sampling_logp_difference/mean", "LoRA"),
+     ("7re5fbb2", "train/sampling/sampling_logp_difference/mean", "full fine-tuning")],
+    "sampling_logp_difference/mean, first 20 steps", "absolute log-prob difference (nats/token)", max_step=20,
+)
+```
+
+TRL's `sampling_logp_difference/mean` is the **average absolute difference
+between the trainer's and vLLM's log-probability for each sampled token**. For
+each token, it takes the difference between the two log probabilities, drops
+the sign, then averages over the completion tokens. The logs are natural logs,
+so the unit is nats per token. Zero means the copies assigned the sampled token
+the same probability. ([TRL docs](https://huggingface.co/docs/trl/grpo_trainer#logged-metrics))
+
+The full fine-tuning line was flat: 0.0006 at step 1, 0.0007 at step 10,
+0.0006 at step 20. Its importance-sampling ratio stayed at 1.00. LoRA over
+the same 20 steps went from 0.0006 to 0.036, while its ratio fell from 1.00
+to 0.39. So the two copies stayed in sync with full fine-tuning, but drifted
+apart with LoRA.
+
+There was one other possibility: maybe the full fine-tuning model barely moved
+at lr 1e-6. I compared its step-20 checkpoint with the starting model on the
+same tokens. That difference was **0.118 nats per token**, about 200 times the
+trainer-vLLM mismatch. The model had changed; vLLM had kept up.
+
+Full fine-tuning stayed in sync while LoRA drifted, so the problem was specific
+to the LoRA sync path. The [adapter-only path](https://github.com/huggingface/trl/pull/7017) avoided that path, but
+it didn't tell me what was going wrong in the one I was running. My tests in
+Attempt 3 had checked each piece separately; none had followed the tensors
+through a live sync. I went back to the TRL and vLLM code and traced one update
+through both.
+
+### Finding the bug
+
+The bug was in the handoff between the two libraries.
+
+In [TRL's weight iterator](https://github.com/huggingface/trl/blob/3d9261f1fec9f9a8140099c78a65c7da73dce79c/trl/generation/vllm_generation.py#L2403-L2450),
+LoRA sync merges the adapter into the base weights, then yields each weight to
+vLLM. These aren't snapshots: `param.data` points to the live tensor. After
+the last weight, TRL unmerges the adapter before the iterator is done.
+
+vLLM collects those tensors into 1 GB chunks before copying each chunk into an
+NCCL send buffer. For the earlier chunks, it copies while TRL is paused at a
+yield, with the adapter still merged. For the last chunk, vLLM asks the
+iterator for another weight to see if there is more. TRL reaches the end and
+unmerges the adapter first. Then vLLM copies the last chunk. Those tensors now
+hold the plain base weights again.
+
+Here's one sync of the fp32 model:
+
+<figure>
+<img src="assets/trl-weight-sync.gif" alt="Animation of TRL merging LoRA weights, vLLM buffering tensors, and the final chunk being copied after TRL unmerges the adapter." style="display: block; width: 100%; max-width: 960px; height: auto; margin: 0 auto;">
+<figcaption>vLLM copies earlier chunks while the adapter is merged. The final chunk is copied after TRL unmerges it, so those weights are stale.</figcaption>
+</figure>
+
+How much of the model lands in that last chunk depends on how big the model
+is:
+
+| Model | Size | Chunks | Stuck at the starting weights in vLLM |
+|---|---|---|---|
+| Qwen2.5-0.5B, bf16 | 0.99 GB | 1 | **everything** |
+| Qwen2.5-0.5B, fp32 | 1.98 GB | 2 | layers 9–23 of 24 |
+| Qwen3-0.6B, bf16 | 1.19 GB | 2 | the last 4 of 28 layers |
+
+I checked it on CPU with TRL's own generator and vLLM's own packing function,
+on one of the step-100 adapters from the fp32 runs. In fp32, 63 of the 168
+weight matrices LoRA touches reached vLLM with their update, and the other 105
+arrived as base weights. In bf16, the share of the update that reached vLLM
+was **-0.001**. Basically zero.
+
+And that explains everything at once:
+
+- **Every bf16 Qwen2.5 run with vLLM**, from [jr8dtkxv](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/jr8dtkxv) to [c0uc1sfx](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/c0uc1sfx): vLLM never
+  got a single LoRA update. For hundreds of steps, every rollout came from the
+  starting model while the trainer moved on without it. The importance-sampling
+  ratio fell because the gap between the two copies was literally the whole of
+  training, and `sequence_mask` threw away more and more of every batch.
+- **The fp32 run ([i7yh9cby](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/i7yh9cby))** drifted from step 1, because two thirds of the
+  model in vLLM was frozen at the start and the gap grew with every update.
+  That's the 0.003 per step I kept staring at.
+- **Qwen3 learned** because only its last 4 layers were stuck. Most of the
+  update got through, and its mismatch grew slowly, 0.012 to 0.029, which I had
+  written off as bf16 noise.
+- **Full fine-tuning was fine** because there is no unmerge. The tensors vLLM
+  holds are still the right weights when it copies them.
+- **My piece-by-piece tests passed** because in those, I merged the adapter
+  myself, built the list of weights, and then synced. Nothing unmerged in the
+  middle of the sync, so the bug never had a chance to happen. I had tested
+  every piece, just not the order they run in.
+
+So it wasn't a config mistake on my side after all. TRL hands out live tensors
+it's about to change, and vLLM's packing assumes they won't change until it
+copies them. Each one makes sense on its own, and together they break. As of
+today, it's still the same on both TRL's and vLLM's main branches.
+
+### The fix
+
+The fix is small: copy every tensor while the adapter is still merged, and hand
+vLLM the copies. The unmerge can do whatever it wants to the live weights
+after that. It costs one extra copy of the model on the GPU that sends, about
+2 GB in fp32 for this model. I ran the CPU check again. In fp32, all 290
+tensors now arrive exactly as the merged model. In bf16, 71% of the update gets
+through, and the rest is lost to rounding when a small update gets added to a
+bf16 weight (the same thing I saw in Attempt 3). No sync can fix that part.
+
+Then I tried the fix live in [wyua69fh](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/wyua69fh):
+LoRA, fp32, vLLM, 20 steps. It started from the same model as
+[i7yh9cby](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/i7yh9cby).
+
+I added a probe too. After each sync, it scores the same 8 GSM8K test solutions
+with both copies. The usual mismatch is measured on that step's sampled tokens,
+which change from step to step. The probe keeps the tokens fixed, so a change in
+the vLLM-trainer difference means the copies are drifting.
+
+```{python}
+#| label: fig-syncfix
+#| fig-cap: "First 20 steps from the same fp32 OPD model: LoRA before the fix, full fine-tuning, and LoRA with the fix."
+line(
+    [("i7yh9cby", "train/sampling/sampling_logp_difference/mean", "LoRA, before the fix"),
+     ("7re5fbb2", "train/sampling/sampling_logp_difference/mean", "full fine-tuning"),
+     ("wyua69fh", "train/sampling/sampling_logp_difference/mean", "LoRA, with the fix")],
+    "vLLM vs trainer mismatch, first 20 steps", "nats per token", max_step=20,
+)
+```
+
+```{python}
+#| label: fig-probe
+#| fig-cap: "[wyua69fh](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/wyua69fh), the probe: the same 8 test solutions scored by vLLM and the trainer after every sync."
+line(
+    [("wyua69fh", "train/probe/server_vs_trainer", "vLLM vs trainer"),
+     ("wyua69fh", "train/probe/server_moved", "vLLM vs its own first sync")],
+    "Probe after every weight sync", "nats per token",
+)
+```
+
+0.0006 at step 1 and 0.0006 at step 20, with the ratio between 0.998 and 1.005
+the whole way. And the probe says the same thing from the other side: vLLM and
+the trainer stayed about 0.002 apart, while vLLM moved away from where it
+started, from 0 to 0.064 nats per token. **For the first time, the vLLM copy
+was actually training along with the trainer.**
+
+### The yolo run, finally fast
+
+Quick reset: this is OPD warm-up, then RL. No SFT warm-up. The student was
+Qwen2.5-0.5B; for OPD, it learned from Qwen2.5-7B-Instruct on its own answers
+([3fjg9zef](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/3fjg9zef)). Then I ran RL
+on the 3,763 questions left after the presample. The earlier run,
+[i7yh9cby](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/i7yh9cby), used the same
+fp32 OPD model and data, but the LoRA sync bug meant vLLM missed part of each
+update. The 20-step test above,
+[wyua69fh](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/wyua69fh), showed the fix
+kept the two copies in sync. Now I wanted to see what happened over a full run:
+three epochs, about 800 steps, at 4 seconds a step
+([ss5zdsm3](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/ss5zdsm3)).
+
+```{python}
+#| label: fig-ss5zdsm3
+#| fig-cap: "[ss5zdsm3](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/ss5zdsm3), RL after the fp32 OPD warm-up with the sync fix. Comparison: [i7yh9cby](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/i7yh9cby), same start and data before the fix."
+run_grid("ss5zdsm3", "RL after OPD warm-up, sync fixed", compare=("i7yh9cby", "before the fix"))
+```
+
+The mismatch stayed between 0.0005 and 0.0007 for all 208 steps, and the
+ratio at 1.00. The first Qwen2.5 run with vLLM where the two copies agreed
+from start to finish. Exact accuracy on training batches went from 66% in the
+first 25 steps to 80%, and on the test set, **52.9% at step 100 and 54.0% at
+step 200**. [i7yh9cby](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/i7yh9cby), same start before the fix: 47.9% and 48.4%.
+
+```{python}
+#| label: fig-fix-eval
+#| fig-cap: "Test exact accuracy from the same fp32 OPD model, before and after the sync fix. Qwen3-0.6B for reference."
+line(
+    [("ss5zdsm3", "eval/accuracy_exact", "with the fix"),
+     ("i7yh9cby", "eval/accuracy_exact", "before the fix"),
+     ("9ue7k08w", "eval/accuracy_exact", "Qwen3-0.6B")],
+    "Test exact accuracy (right answer, exact format)", "accuracy",
+)
+```
+
+The best Qwen2.5 number in this worklog, but it was flattening out, and the
+entropy was doing the same thing as before: 0.21 over the first 25 steps, 0.09
+by step 200. Still well short of Qwen3's 67.2%, so I stopped it at step 208.
+
+And that 67.2% deserves an asterisk now. Qwen3 was trained through the same
+bug, with its last 4 layers stuck in vLLM the whole run. So it's not even a
+fair baseline anymore.
+
+## bf16, now that the sync works
+
+With the sync fixed, I wanted to know if the fix also saves bf16, the
+all-bf16 yolo plan from before: the bf16 SFT+OPD model, RL in bf16, but with
+vLLM this time. The CPU check had already warned me that bf16 only gets 71%
+of each update through, but I wanted to see what that does to a real run:
+[hqn8qlkh](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/hqn8qlkh), probe on.
+
+```{python}
+#| label: fig-hqn8qlkh
+#| fig-cap: "[hqn8qlkh](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/hqn8qlkh), RL in bf16 on the bf16 SFT+OPD model, with the sync fix. Comparison: [6rr1hcot](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/6rr1hcot), same model and data without vLLM."
+run_grid("hqn8qlkh", "bf16 SFT + OPD + RL, vLLM with the fix", compare=("6rr1hcot", "no vLLM"))
+```
+
+It learned. Exact accuracy on training batches went from 60% to 79% in about
+130 steps, and the test set came in at **45.7% at step 100 and 48.8% at step
+200**. The mismatch sat around 0.009 the whole run, which is just what two bf16
+copies disagree by, and it didn't climb.
+
+But the probe told a different story:
+
+```{python}
+#| label: fig-probe-bf16
+#| fig-cap: "The probe (same 8 test solutions, vLLM vs trainer, after every sync) in fp32 ([wyua69fh](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/wyua69fh)) and in bf16 ([hqn8qlkh](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/hqn8qlkh))."
+line(
+    [("wyua69fh", "train/probe/server_vs_trainer", "fp32"),
+     ("hqn8qlkh", "train/probe/server_vs_trainer", "bf16")],
+    "vLLM vs trainer on fixed tokens", "nats per token",
+)
+```
+
+In fp32, vLLM and the trainer stayed 0.002 apart. In bf16, they started 0.022
+apart and **drifted to 0.055**. That's the other 29% of every update getting
+rounded away, plus the trainer's own base weights getting rounded a little
+more at every merge and unmerge. The importance-sampling ratio slid from 0.99
+to 0.94 by the end. Not a disaster, but it's the old problem again, just
+slower. And entropy went off a cliff: 0.26 at the start, **0.07 by step 110**.
+
+So for the last runs I kept the bf16 SFT+OPD model (its weights are bf16, so
+loading them in fp32 is exact), but ran RL in fp32.
+
+## One last yolo: SFT + OPD + RL, in fp32
+
+All right, here's the full stack: **SFT → OPD → RL**. The first time around,
+SFT and OPD were separate experiments. SFT got the format right; OPD gave a
+much bigger jump in exact accuracy. I wanted to see if I could get both: teach
+the student the format with SFT, then give it the 7B teacher's reasoning with
+OPD, then let RL work on the questions still left. That's the model behind
+this run.
+
+The bf16 version reached 48.8%, but the probe showed the two copies drifting.
+So: same SFT+OPD model, same RL data, but fp32 for RL. And I saved a checkpoint
+every 10 steps instead of every 100. I had a trick in mind for all those
+checkpoints. This was
+[cr17x4tb](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/cr17x4tb).
+
+```{python}
+#| label: fig-cr17x4tb
+#| fig-cap: "[cr17x4tb](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/cr17x4tb), RL in fp32 on the bf16 SFT+OPD model. Comparison: [hqn8qlkh](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/hqn8qlkh), the same run in bf16."
+run_grid("cr17x4tb", "SFT + OPD + RL, fp32", compare=("hqn8qlkh", "bf16"))
+```
+
+**46.8% at step 100 and 50.9% at step 200**, 1 to 2 points above bf16 at the
+same steps. Training accuracy climbed from 63% to 84%. And then it
+flattened, the same way every run before it had. Two panels said why.
+Entropy fell from 0.24 to 0.07. And the share of groups where all 8 answers got
+the same reward went from 11% to **49%**. Half of every batch was questions the
+model now got right 8 times out of 8, and a group like that has no advantage,
+so no gradient. Half the compute, doing nothing.
+
+### A friend's trick: average the checkpoints
+
+A friend, [Ritvik Rastogi](https://x.com/RitvikRastogi19), told me about
+averaging checkpoints when RL goes flat. In [Aryabhata 2](https://arxiv.org/abs/2605.28829),
+he and his coauthors describe using EMA-based checkpoint merging when reward
+improvements plateau. My version here was simpler: average the checkpoints
+from the last 100 steps, then restart from that model.
+
+The last few checkpoints of a plateaued run are noisy versions of almost the
+same model. Averaging can cancel some of that noise. It's the same family of
+idea as EMA or model soups.
+
+There's one catch with LoRA. A LoRA checkpoint changes a weight by B·A, so
+you can't just average all the A's and all the B's: the average of the
+products isn't the product of the averages. So for every weight, I computed
+each checkpoint's full update, averaged those, and added the average to the
+base weights, in fp32. Ten checkpoints, steps 140 to 230. The average update
+came out 89% the size of the last checkpoint's and pointed almost the same way
+(cosine 0.96). So the average is very close to where the run already was.
+
+Then RL from the averaged model, with a new LoRA and a new optimizer:
+[9su2pimg](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/9su2pimg).
+
+```{python}
+#| label: fig-9su2pimg
+#| fig-cap: "[9su2pimg](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/9su2pimg), RL from the average of [cr17x4tb](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/cr17x4tb)'s steps 140–230. Comparison: [cr17x4tb](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/cr17x4tb)."
+run_grid("9su2pimg", "RL from the averaged checkpoint", compare=("cr17x4tb", "before averaging"))
+```
+
+The reward jumped right away: 84% exact on training batches from the first
+steps, and a reward around 4.56. But it stayed exactly there, 4.56 to 4.59
+over 100 steps. Half the groups still had no signal (50–53%), and entropy stayed
+at 0.07–0.08. So the average was a slightly better copy of the same
+plateau.
+
+I don't have a test number for this run, and that one's on me. I stopped it
+at step 100, just before its first evaluation. The next run then used the
+same output folder and overwrote all its checkpoints. That's why every
+checkpoint now carries the W&B run it came from. The closest thing I have is
+the greedy score of the averaged model itself, which the next OPD run measured
+at its step 0: 53.9% exact.
+
+### Presampling again
+
+Half of every batch being 8/8 meant the old presample was stale. It was built
+from the model before any RL. So I presampled the averaged model: 8 samples
+for each of the 7,473 training questions.
+
+| Presample | 0/8 | 1–7/8 (RL can learn from these) | 8/8 | mean correctness |
+|---|---|---|---|---|
+| bf16 SFT+OPD model, before RL | 1,660 | 5,507 | 306 | — |
+| averaged model, after ~230 RL steps | 859 | 3,706 | 2,908 | 66.6% |
+
+RL had moved about 2,600 questions into the always-right bucket. Dropping
+those and the 859 it never solves left 3,706 questions, and I restarted
+from the averaged model on those:
+[31o2sw5e](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/31o2sw5e).
+
+```{python}
+#| label: fig-31o2sw5e
+#| fig-cap: "[31o2sw5e](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/31o2sw5e), RL from the averaged checkpoint on its re-presampled questions. Comparison: [9su2pimg](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/9su2pimg), same model, old filter."
+run_grid("31o2sw5e", "Averaged checkpoint, re-presampled data", compare=("9su2pimg", "old filter"))
+```
+
+The first thing I saw was the reward *dropping* to about 3.9, and for a
+moment I thought the filter had made things worse. It hadn't. Every
+question the model always got right was gone, so the same model just scored
+lower on what was left. The groups with no signal went from 50% to 22%, and on
+the test set it did better: **51.4% at step 100**, above [cr17x4tb](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/cr17x4tb)'s 50.9% at
+step 200. But the reward was flat, and entropy was still 0.09. RL can only push
+toward answers the model already writes sometimes. At entropy 0.09 it writes
+about the same answer every time, and on the 859 questions it never solves,
+there's nothing to push toward at all.
+
+### OPD, round two
+
+So the only way forward was new signal, from something that knows answers
+this model doesn't. The first OPD warm-up had given the biggest jump in
+this whole worklog (41.0%, against 22.5% for the SFT warm-up), so I tried it
+again. OPD from the 7B
+teacher, starting from the averaged model, on the 2,159 questions it solved
+at most 3 out of 8 times:
+[hbowg7ok](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/hbowg7ok). 1,370 of those
+are questions SFT had trained on, so RL never sees them, and OPD is the only
+signal they get.
+
+
+```{python}
+#| label: fig-hbowg7ok
+#| fig-cap: "[hbowg7ok](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/hbowg7ok), OPD round two: greedy test accuracy, and entropy on its training questions."
+aux_grid(
+    [("hbowg7ok", "OPD from the averaged model")],
+    [("eval/accuracy", "Test: right answer (greedy)"), ("eval/format", "Test: format (greedy)"),
+     ("train/entropy", "Entropy")],
+    "OPD round two",
+)
+```
+
+On the test set, greedy: correct answers 53.9% at the start and 54.0% at the
+end. OPD didn't teach it any new maths in 114 steps. The format did the thing
+I had worried about the first time: the teacher only gets 77% of its own
+answers in exact format, and the student's format slipped from 99.7% to 94.1%.
+But entropy went *up*, from 0.23 to 0.31, and the presample showed where:
+
+| Presample | 0/8 | 1–7/8 | 8/8 | mean correctness |
+|---|---|---|---|---|
+| averaged model | 859 | 3,706 | 2,908 | 66.6% |
+| after OPD round two | 647 | **4,601** | 2,225 | 64.9% |
+
+A little less often right on average, but a lot less sure of itself: 212
+fewer questions it never solves, 683 fewer it always solves, and 24% more
+questions RL can actually learn from.
+
+### The last run
+
+RL on the OPD model, filtered by its own presample:
+[96sm515g](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/96sm515g).
+
+```{python}
+#| label: fig-96sm515g
+#| fig-cap: "[96sm515g](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/96sm515g), RL after OPD round two. Comparison: [31o2sw5e](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/31o2sw5e), the same averaged model before OPD."
+run_grid("96sm515g", "RL after OPD round two", compare=("31o2sw5e", "before OPD round two"))
+```
+
+The format came back in about 90 steps (97.9% to 99.7%), like it always does
+under RL. Entropy started at 0.20, more than twice the 0.09 of the run before,
+and the groups with no signal started at 15%. Then the same slide as every
+other run: entropy 0.09 by step 230, groups with no signal 38%. But this
+time the test set went further than any run before it: **53.7% at step 100
+and 56.0% at step 200**.
+
+I let this one run to the end, to see where the wall is this time. After step
+200 it didn't climb any more. It went back down a little: 55.7% at step 300
+and 54.8% at step 400, with entropy at 0.07 and almost half the groups (46%)
+giving no signal again. So the peak was step 200, and that checkpoint is the
+best Qwen2.5 model this worklog produced.
+
+```{python}
+#| label: fig-final-eval
+#| fig-cap: "Test exact accuracy (temperature 1, mean over 8 samples) in every RL run with the sync fix: [96sm515g](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/96sm515g), [31o2sw5e](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/31o2sw5e), [cr17x4tb](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/cr17x4tb), [hqn8qlkh](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/hqn8qlkh), [ss5zdsm3](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/ss5zdsm3). Qwen3-0.6B: [9ue7k08w](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/9ue7k08w)."
+line(
+    [("96sm515g", "eval/accuracy_exact", "after OPD round two"),
+     ("31o2sw5e", "eval/accuracy_exact", "averaged + re-presampled"),
+     ("cr17x4tb", "eval/accuracy_exact", "SFT + OPD + RL, fp32"),
+     ("hqn8qlkh", "eval/accuracy_exact", "SFT + OPD + RL, bf16"),
+     ("ss5zdsm3", "eval/accuracy_exact", "OPD + RL, fp32"),
+     ("9ue7k08w", "eval/accuracy_exact", "Qwen3-0.6B")],
+    "Test exact accuracy", "accuracy",
+)
+```
+
 ## Where this leaves me
 
-Every piece of the weight sync works when I test it alone, and the live
-training loop still drifts, only for Qwen2.5. I haven't found why yet. While
-it's there, `sequence_mask` throws away a big share of every batch. That is my
-best guess for why RL added so little on top of each warm-up, even though
-every group had a learning signal and the warm-ups kept raising the starting
-point.
+This is where I'm calling it. The first RL run with the full reward set
+scored **6.3%** exact on the test set, and the last one **56.0%**, on the same
+evaluation. It never got to Qwen3-0.6B's 67.2%.
 
-I tried the two warm-ups separately, then ran RL after each. Here's where each
-attempt landed on the test set:
-
-| Experiment | Test exact accuracy |
+| Run | Test exact accuracy |
 |---|---|
-| Qwen2.5-0.5B, full reward set, no warm-up ([cr6hatom](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/cr6hatom)) | 6.3% |
-| SFT warm-up, then RL ([6hqxh39p](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/6hqxh39p)) | 22.5% |
-| OPD warm-up, then RL ([c0uc1sfx](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/c0uc1sfx)) | 41.0% |
-| OPD warm-up, then RL in fp32 ([i7yh9cby](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/i7yh9cby)) | 48.6% |
-| *Qwen3-0.6B, same recipe, no warm-up ([9ue7k08w](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/9ue7k08w))* | *67.2%* |
+| Qwen2.5-0.5B, full reward set ([cr6hatom](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/cr6hatom)) | 6.3% |
+| + SFT warm-up ([6hqxh39p](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/6hqxh39p)) | 22.5% |
+| + OPD warm-up ([c0uc1sfx](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/c0uc1sfx)) | 41.0% |
+| + SFT warm-up, RL without vLLM ([gdi2sbor](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/gdi2sbor)) | 42.2% |
+| + OPD warm-up, fp32 ([i7yh9cby](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/i7yh9cby)) | 48.6% |
+| + OPD warm-up, fp32, sync fixed ([ss5zdsm3](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/ss5zdsm3)) | 54.0% |
+| + SFT + OPD warm-ups, bf16, sync fixed ([hqn8qlkh](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/hqn8qlkh)) | 48.8% |
+| + SFT + OPD warm-ups, fp32, sync fixed ([cr17x4tb](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/cr17x4tb)) | 50.9% |
+| + checkpoint average, re-presampled ([31o2sw5e](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/31o2sw5e)) | 51.4% |
+| + OPD round two ([96sm515g](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/96sm515g), best at step 200) | **56.0%** |
+| *Qwen3-0.6B, same recipe, no warm-up, with the sync bug ([9ue7k08w](https://wandb.ai/ml-colabs/rlvr-gsm8k/runs/9ue7k08w))* | *67.2%* |
 
-If you're doing GRPO with a separate vLLM server, the one thing I'd tell you
-is: put `sampling/sampling_logp_difference` and
-`sampling/importance_sampling_ratio` on your dashboard from step 1. I spent
-most of this worklog tuning rewards, while the number that decided how much
-of each batch the model was learning from sat in a panel I never opened.
+Looking back, the warm-ups mattered: they took test accuracy from 6.3% to
+41%. Then I spent a long time staring at a curve that wouldn't move. It turned
+out vLLM was only getting part of each update. The bug was in the order TRL
+and vLLM handled the weights. Once I fixed it, RL started learning. But the
+runs still hit the same wall: entropy around 0.08, half the groups with no
+reward variation, and the reward going flat. Checkpoint averaging,
+re-presampling and another round of OPD each bought me a little more room. I
+still hit the plateau.
+
+I think that wall is mostly the model. Qwen reports 49.6% on GSM8K for
+Qwen2.5-0.5B-Instruct, and I got it to 56% exact in a strict format. RL
+sharpens what a model can already do. It doesn't give a 0.5B model maths it
+doesn't have, and OPD round two showed that 114 steps of a 7B teacher don't
+either. Qwen3-0.6B starts from a much stronger base, and that's most of the
+11-point gap.
+
+If you're doing GRPO with LoRA and a separate vLLM server, check this before
+anything else: after a few steps, is `sampling/sampling_logp_difference` still
+where it started? If it climbs, your vLLM copy isn't getting all your
+updates, and the smaller your model is, the more of it is missing. I spent
+most of this worklog tuning rewards, while the thing that decided whether the
+model learned at all was a copy that happened one line too late.
 
 ## Runs referenced
 
@@ -884,7 +1549,7 @@ from IPython.display import Markdown
 
 RUNS = [
     ("jr8dtkxv", "correctness + format, full training set"),
-    ("dszbz193", "0/8 and 8/8 questions from jr8dtkxv's rollouts removed, group size 4"),
+    ("dszbz193", "0/8 and 8/8 questions removed from earlier rollouts, group size 4"),
     ("iql9rc9t", "4-sample presample, + tag, lenient and exact rewards, fixed optimizer"),
     ("cr6hatom", "8-sample presample, full seven-reward set, Qwen2.5-0.5B"),
     ("9ue7k08w", "same recipe on Qwen3-0.6B"),
@@ -899,6 +1564,21 @@ RUNS = [
     ("i7yh9cby", "RL after OPD, fp32 end to end"),
     ("blyv9d73", "fp32, single GPU"),
     ("cpgrs28e", "fp32, single GPU, vLLM at 25% memory"),
+    ("gv11dzpk", "SFT warm-up, RL without vLLM, stopped too early (23 steps)"),
+    ("gdi2sbor", "SFT warm-up, RL without vLLM, 200 steps"),
+    ("idj5wrml", "SFT warm-up with bf16 weights"),
+    ("ht3y144u", "OPD with bf16 weights, on top of the bf16 SFT model"),
+    ("6rr1hcot", "RL without vLLM on the bf16 SFT + OPD model, entropy collapse"),
+    ("75nd1lv5", "same, with adaptive entropy, clip-higher and lr 1e-5, stalled"),
+    ("7re5fbb2", "full fine-tuning with vLLM, fp32 OPD model, 20 steps: no drift"),
+    ("wyua69fh", "LoRA with vLLM and the sync fix, fp32, 20 steps, with the probe"),
+    ("ss5zdsm3", "RL after the fp32 OPD warm-up with the sync fix, stopped at step 208"),
+    ("hqn8qlkh", "RL in bf16 on the bf16 SFT+OPD model, sync fix + probe"),
+    ("cr17x4tb", "same model and data, RL in fp32, a checkpoint every 10 steps"),
+    ("9su2pimg", "RL from the average of the fp32 run’s steps 140-230 (no test eval)"),
+    ("31o2sw5e", "same averaged model, re-presampled questions"),
+    ("hbowg7ok", "OPD round two from the averaged model, on questions solved <= 3/8"),
+    ("96sm515g", "RL after OPD round two, re-presampled questions (the last run)"),
 ]
 Markdown("| Run | What it was |\n|---|---|\n" + "\n".join(f"| [{r}]({run_url(r)}) | {d} |" for r, d in RUNS))
 ```
