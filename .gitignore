@@ -5,3 +5,5 @@ _site/posts/assets/*.dmg
 /_freeze/site_libs/
 /posts/posttraining_gsm8k_worklog/.env
 /posts/posttraining_gsm8k_worklog/.worklog-venv/
+/posts/rl_ar_diffusion/.venv/
+blog/**

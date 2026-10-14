@@ -1,0 +1,398 @@
+---
+title: "Does RL in AR mode move the diffusion mode too?"
+date: 2026-10-14
+description: "A worklog on training Nemotron-Labs-Diffusion-3B with AR-only GRPO, then measuring what transfers to diffusion decoding."
+categories: [LLMs, RL, Diffusion, Worklog]
+format:
+  html:
+    code-fold: true
+execute:
+  echo: false
+  warning: false
+execute-dir: file
+jupyter: python3
+---
+
+<!-- Every number here comes from data/*.csv, which were built from the eval outputs (runs/*/summary.json and the
+per-problem jsonl files) and the training log. W&B: training run rnphaoqz, eval sweep ntlqj24f
+(project ml-colabs/diffusion-ar-rl). -->
+
+```{python}
+#| label: setup
+import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+modes = pd.read_csv("data/modes.csv")
+train = pd.read_csv("data/train.csv")
+train_eval = pd.read_csv("data/train_eval.csv")
+
+# Bundle Plotly into the frozen output so charts also work without a CDN.
+from IPython.display import HTML, display
+
+_plotly_loaded = False
+
+
+def show(fig):
+    global _plotly_loaded
+    display(HTML(fig.to_html(
+        full_html=False, include_plotlyjs=not _plotly_loaded,
+        config={"responsive": True, "displaylogo": False,
+                "modeBarButtonsToRemove": ["sendDataToCloud", "shareChart", "select2d", "lasso2d"]},
+    )))
+    _plotly_loaded = True
+
+AR, DIFF = "#2a78d6", "#eb6834"
+NAMES = {"ar": "AR mode", "diff": "Diffusion mode"}
+COLORS = {"ar": AR, "diff": DIFF}
+SYMBOLS = {"ar": "circle", "diff": "diamond"}
+
+
+def style(fig, title, x_title, y_title, height=440):
+    fig.update_layout(
+        template="plotly_white",
+        title=dict(text=title, x=0.01, font=dict(size=15)),
+        font=dict(size=12),
+        legend=dict(orientation="h", yanchor="top", y=-0.2, x=0),
+        margin=dict(t=70, b=60, l=55, r=20),
+        height=height,
+        hovermode="x unified",
+    )
+    fig.update_xaxes(title_text=x_title)
+    fig.update_yaxes(title_text=y_title)
+    return fig
+
+
+def acc_by_step(task, title, y_title):
+    fig = go.Figure()
+    for m in ("ar", "diff"):
+        d = modes[(modes.task == task) & (modes["mode"] == m)].sort_values("step")
+        fig.add_trace(go.Scatter(
+            x=d.step, y=d.acc * 100, name=NAMES[m], mode="lines+markers",
+            line=dict(color=COLORS[m], width=2), marker=dict(symbol=SYMBOLS[m], size=9),
+            error_y=dict(type="data", array=d.se * 100, thickness=1, width=4, color=COLORS[m]),
+            hovertemplate="Step %{x}<br>%{y:.1f}%<extra>%{fullData.name}</extra>",
+        ))
+    fig.update_xaxes(tickvals=sorted(modes.step.unique()))
+    return style(fig, title, "training step (checkpoint)", y_title)
+```
+
+The thing that excites me about diffusion language models is the speed. Instead of writing an answer one token at
+a time, they can work on several tokens at once. But I haven't come across a post-training recipe for diffusion
+transformers that feels mainstream yet. How do I take one of these fast models and make it better at a task?
+
+Then NVIDIA put out [Nemotron-Labs-Diffusion-3B](https://huggingface.co/nvidia/Nemotron-Labs-Diffusion-3B), which can
+generate text in two ways: one token at a time, like a regular language model (autoregressive, or AR mode), and
+several tokens at once (diffusion mode). Both modes use the same model weights.
+
+That gave me a possible way in. We already have recipes for post-training autoregressive models. **What if I
+post-train this model in AR mode, then switch it back to diffusion? Does any of that improvement carry over?**
+
+If it does, that would be insanely valuable: I could use a familiar training setup to improve the model, then
+use its faster diffusion mode to generate answers. Of course, sharing weights doesn't guarantee that the gains
+transfer. Diffusion mode might improve, get worse, or barely change.
+
+That's what this experiment is about. I use reinforcement learning (RL) to train the AR mode on math problems,
+then measure both modes at each saved checkpoint. I'm not trying to hillclimb a benchmark here. I want to see
+whether making one mode better also helps the other.
+
+## Experiment design
+
+I need to establish two things. First, the training actually makes AR mode better at the task. Then, whether
+diffusion mode improves too, even though I never train it to generate in diffusion mode.
+
+So the setup is simple: start with the original model, train it **only in AR mode**, and save checkpoints along
+the way. At each checkpoint, take those same weights and evaluate them in both modes. The original model is
+step 0, which gives each mode its own starting score.
+
+The comparison I care about is **how much each mode improves over its own baseline**. Diffusion doesn't need
+to beat AR for this to be useful. If AR improves and diffusion picks up some of that gain, that's already a
+promising route to post-training a model I can later run in diffusion mode. If AR improves but diffusion stays
+flat or gets worse, sharing weights wasn't enough.
+
+I also want a task with room to improve and answers I can check automatically. That led me to math. The final
+setup, after the task-selection probes below, looks like this:
+
+| Part of the experiment | Setup |
+|---|---|
+| Model | Nemotron-Labs-Diffusion-3B |
+| Training | AR-only RL on [MATH](https://github.com/hendrycks/math) train Levels 4 and 5: 3,994 problems |
+| Main evaluation | 500 [MATH](https://github.com/hendrycks/math) Level-5 problems from the test split |
+| Control evaluation | 200 [GSM8K](https://huggingface.co/datasets/openai/gsm8k) test questions, outside the training dataset |
+| Checkpoints evaluated | Original model, then steps 25, 50, 75, 100, 125 and 150 |
+
+### How I evaluate it
+
+Both modes answer the same test questions at every checkpoint, with greedy decoding and one answer per question.
+The score is accuracy: what fraction of those answers are correct? Keeping the questions fixed also lets me
+look at which problems a checkpoint fixes and which it breaks relative to the original model.
+
+AR runs through vLLM; diffusion runs through SGLang. Within each mode, I keep the engine and decoding settings
+fixed across checkpoints. I'll get into why the diffusion engine matters later. There's also a token-budget
+mismatch in this run: AR gets a 2,048-token context, including the prompt, while diffusion gets 2,048 new tokens.
+That limits how directly I can compare the two modes, especially as answers get longer.
+
+GSM8K is a small control for changes beyond the harder MATH problems. It can flag a gain or regression there;
+it can't tell me that the model is better, or unaffected, on everything else.
+
+This is one training run, so I'm treating it as an initial test of whether transfer happens. If it does, the
+next question is how reliable it is across runs and with equal answer budgets.
+
+## Picking a task with room to improve
+
+The [tech report](https://d1qx31qr3h6wln.cloudfront.net/publications/Nemotron_Diffusion_Tech_Report.pdf) has numbers
+for the 3B instruct model, and on the easy stuff it's already done. GSM8K is 87.9 in AR and 88.4 in diffusion. Less
+headroom there for this experiment. AIME is the opposite, 23.3 / 16.7 on AIME24, and with 30 questions that's way too noisy to see
+anything.
+
+My first idea was Countdown. You get 3 or 4 numbers and a target, and you have to hit the target with + - * /, using
+every number exactly once. It's synthetic, the reward is a trivial check, and small models usually climb on it fast
+with RL. I took 500 problems from [Jiayi-Pan/Countdown-Tasks-3to4](https://huggingface.co/datasets/Jiayi-Pan/Countdown-Tasks-3to4) as a held-out set and ran the base model, greedy,
+one answer per problem.
+
+| Mode | Accuracy | 3 numbers | 4 numbers |
+|---|---|---|---|
+| AR | 10.0% | 15.8% | 4.9% |
+| Diffusion | 3.6% | 7.3% | 0.4% |
+
+Yeah. Too low. In AR the model mostly just blurts out an equation without any reasoning, and in diffusion mode 367 of
+the 500 answers never even write an `<answer>` tag, they loop until they run out of tokens. With accuracy this low,
+most GRPO groups would be all zeros and there's barely anything to learn from. So I dropped it.
+
+MATH turned out to be the sweet spot. I ran 300 problems from each difficulty level of the MATH test set in AR mode:
+
+| MATH level | AR accuracy |
+|---|---|
+| Level 3 | 84.3% |
+| Level 4 | 75.7% |
+| Level 5 | 59.3% |
+
+Level 5 it is. Diffusion mode on the same 300 Level-5 problems got 56.3%, so the two modes start close to each other.
+
+The plan: train on MATH train Levels 4 and 5 (3,994 problems), test on 500 Level-5 problems from the test split, and
+keep 200 GSM8K questions on the side as a control. If diffusion mode moves on MATH but also drops on GSM8K, that's a
+different story from "diffusion learned math".
+
+## RL in AR mode, without touching the trainer
+
+The model ships with its own custom code, and there's no way I'm getting that into a GRPO trainer with vLLM rollouts
+as is. But when I read the modeling code, the AR mode is literally a Ministral3 decoder with a causal mask, and the
+output head is just called `diffusion_head` instead of `lm_head`. So I renamed the weights (`encoder.*` to `model.*`,
+`diffusion_head.*` to `lm_head.*`) and saved it as a plain `Ministral3ForCausalLM`.
+
+Before trusting that, I checked it. Same prompt through the original model's AR path and through the converted one:
+the largest logit difference was 0.0, and greedy decoding gave the exact same tokens. So for AR it *is* the same
+model, and now vLLM and TRL load it like any other LLM. To evaluate diffusion mode, I just rename the weights back.
+
+The RL itself is plain GRPO in TRL, with vLLM generating the rollouts on the same 8 H100s:
+
+- 64 problems per step, 8 answers each, so 512 rollouts per step
+- learning rate 1e-6, no KL penalty, temperature 1.0, up to 2,048 tokens per answer
+- reward is 1 if `math-verify` says the `\boxed{}` answer matches the gold answer, else 0
+- a checkpoint every 25 steps
+
+```bash
+VLLM_USE_FLASHINFER_SAMPLER=0 uv run accelerate launch --config_file configs/fsdp8.yaml -m dar.train_grpo \
+  --task math --run-name grpo-ar-math-l45-3b-200 \
+  --title "AR-mode GRPO on MATH L4-5, 3B" \
+  --hypothesis "RL in AR mode also raises diffusion-mode accuracy on the same task" --vllm-mem 0.4
+```
+
+## Training
+
+The run is [`grpo-ar-math-l45-3b-200`](https://wandb.ai/ml-colabs/diffusion-ar-rl/runs/rnphaoqz), about 34 s per
+step. I planned 200 steps, but the trainer's own check (AR mode, 128 test problems, one sampled answer each) went flat
+around step 100, so I stopped it at step 163. The last checkpoint is step 150.
+
+```{python}
+#| label: fig-train
+#| fig-cap: "Training run rnphaoqz. Top: mean reward on the training rollouts (10-step rolling mean), which is the share of the 512 sampled answers per step that were right. Bottom: mean answer length in tokens. Both come from the training batch, not the test set."
+fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.08,
+                    subplot_titles=("training reward (share of rollouts correct)", "mean answer length (tokens)"))
+fig.add_trace(go.Scatter(x=train.step, y=train.reward.rolling(10, min_periods=1).mean(), name="reward",
+                         line=dict(color=AR, width=2), hovertemplate="%{y:.3f}"), row=1, col=1)
+fig.add_trace(go.Scatter(x=train.step, y=train.mean_length.rolling(10, min_periods=1).mean(), name="answer length",
+                         line=dict(color=AR, width=2), hovertemplate="%{y:.0f}"), row=2, col=1)
+style(fig, "AR-mode GRPO on MATH Levels 4-5", None, None, height=560)
+fig.update_xaxes(title_text="training step", row=2, col=1)
+fig.update_layout(showlegend=False)
+show(fig)
+```
+
+The reward goes from about 0.62 over the first 10 steps to about 0.74 after step 100. The answers also get a lot
+longer, from about 735 tokens to about 1,100. Keep that in mind, it comes back later. By steps 51 to 100, about 21%
+of the rollouts were hitting the 2,048-token limit.
+
+```{python}
+#| label: fig-trainer-eval
+#| fig-cap: "Trainer-side AR evaluation: 128 test problems, one sampled answer each. This is a separate evaluation from the 500-problem greedy checkpoint sweep below."
+fig = go.Figure(go.Scatter(
+    x=train_eval.step, y=train_eval.eval_acc_ar_sampled_128 * 100,
+    mode="lines+markers", name="AR (sampled, n=128)",
+    line=dict(color=AR, width=2), marker=dict(size=8),
+    hovertemplate="Step %{x}<br>%{y:.1f}%<extra>%{fullData.name}</extra>",
+))
+fig.update_xaxes(tickvals=train_eval.step.tolist())
+show(style(fig, "The trainer's sampled AR check", "training step", "accuracy (%)"))
+```
+
+## The diffusion eval was embarrassingly slow
+
+For the first diffusion numbers I used NVIDIA's HF `generate()` with block size 32 and confidence threshold 0.9,
+which is what the model card shows. It works, but it decodes one problem at a time. On 300 Level-5 problems it ran at
+about **77 tokens/s per GPU**. The whole point of a diffusion LM is to be fast, so running it like this is kind of
+silly, and with 7 checkpoints × 700 problems it would also just take forever.
+
+At the time of this run, the vLLM diffusion path I looked at supported DiffusionGemma, and each model brought
+its own sampler, so using this model there would have needed a port. NVIDIA's own serving code is an SGLang PR,
+[sgl-project/sglang#25803](https://github.com/sgl-project/sglang/pull/25803), which adds this model with `FastDiffuser`
+(plain diffusion mode) plus CUDA graphs and batching. I built that branch in its own environment, since it wants
+torch 2.11, with the same settings as the HF run: 32-token blocks, threshold 0.9, a causal pass to seed each block.
+
+Getting it to start on this box took three fixes, all on the environment side. There's no CUDA toolkit on the node, so
+I pointed `CUDA_HOME` at the one that ships in the venv. FlashInfer tried to compile its kernels and failed, so I
+installed its prebuilt kernels the same way the PR's Dockerfile does. And pip had pulled a CUDA 13.4 compiler next to
+a 13.0 runtime, so I pinned the compiler packages back to 13.0.
+
+After that: **10,720 tokens/s over 8 GPUs**, about 1,340 per GPU, against 77 per GPU before. 300 problems in 97
+seconds.
+
+But the accuracy didn't match. On the same 300 problems SGLang got 52.3%, HF got 56.3%. Only 27 of the 300 answers
+were word for word the same, and the rest split after about 400 characters (the median), which is consistent with greedy
+decoding diverging after small numerical differences between engines. I did not isolate the cause. On the problems where they disagree, HF alone was
+right on 32 and SGLang alone on 20. That's a McNemar p of about 0.10, so the gap could be noise, but I can't call it
+zero either. So the rule from here on: every checkpoint goes through SGLang, and I only compare SGLang numbers with
+SGLang numbers.
+
+## AR vs diffusion, checkpoint by checkpoint
+
+Every checkpoint, both modes, greedy, one answer per problem: 500 MATH Level-5 test problems and 200 GSM8K questions.
+AR runs in vLLM, diffusion in SGLang. The eval sweep is [`grpo-ar-math-l45-3b-200-modes`](https://wandb.ai/ml-colabs/diffusion-ar-rl/runs/ntlqj24f).
+
+```{python}
+#| label: fig-math
+#| fig-cap: "MATH Level 5, 500 test problems, greedy, one answer per problem. Step 0 is the base model. Error bars are ±1 standard error (about ±2.2 points). AR in vLLM, diffusion in SGLang (FastDiffuser, block 32, threshold 0.9). Eval sweep ntlqj24f."
+show(acc_by_step("math-l5", "MATH Level 5: AR vs diffusion", "accuracy (%)"))
+```
+
+And... it moves. Diffusion mode was never trained, not one masked block, and it went from 51.8% to somewhere between
+55.2% and 59.0% depending on the checkpoint. AR went from 59.2% to between 63.0% and 66.8%.
+
+The cleaner way to see it is the change from step 0, per mode:
+
+```{python}
+#| label: fig-gain
+#| fig-cap: "Change in MATH Level-5 accuracy from the base model (step 0), in percentage points. Same evals as the figure above."
+fig = go.Figure()
+for m in ("ar", "diff"):
+    d = modes[(modes.task == "math-l5") & (modes["mode"] == m)].sort_values("step")
+    base = d[d.step == 0].acc.iloc[0]
+    d = d[d.step > 0]
+    fig.add_trace(go.Bar(x=d.step, y=(d.acc - base) * 100, name=NAMES[m], marker_color=COLORS[m],
+                         hovertemplate="%{y:+.1f} pts"))
+fig.update_layout(barmode="group", bargap=0.3, bargroupgap=0.08)
+fig.update_xaxes(tickvals=[25, 50, 75, 100, 125, 150])
+show(style(fig, "MATH Level 5: gain over base", "training step (checkpoint)", "change from step 0 (points)"))
+```
+
+| Step | AR | Diffusion | AR gain | Diffusion gain |
+|---|---|---|---|---|
+| 0 | 59.2% | 51.8% | | |
+| 25 | 64.0% | 57.8% | +4.8 | +6.0 |
+| 50 | 64.8% | 56.0% | +5.6 | +4.2 |
+| 75 | 63.0% | 57.6% | +3.8 | +5.8 |
+| 100 | 65.0% | 55.2% | +5.8 | +3.4 |
+| 125 | 66.8% | 59.0% | +7.6 | +7.2 |
+| 150 | 65.0% | 57.0% | +5.8 | +5.2 |
+
+Averaged over the six checkpoints, AR gained 5.6 points and diffusion gained 5.3. This is a descriptive
+average of checkpoint scores, not the accuracy of an ensemble or six independent experiments. Diffusion picked up almost the same
+gain as the mode that was actually trained.
+
+Is that real? These are the same 500 problems at every step, so I can check each checkpoint against step 0 problem by
+problem (a McNemar test). For diffusion, the change from step 0 is significant at p < 0.05 at steps 25, 75, 125 and
+150 (p = 0.007, 0.014, 0.002, 0.031). At steps 50 and 100 it isn't (p = 0.09 and 0.16). AR is significant at every
+checkpoint except step 75 (p = 0.08). Those are unadjusted p-values across six checkpoint comparisons per mode. The checkpoints also share a
+training run and a test set, so they are not independent replications. The direction is consistent across
+checkpoints, but this is still evidence from one run.
+
+What did *not* happen is the gap closing. Diffusion was 7.4 points behind AR at step 0 and 8.0 behind at step 150.
+AR RL lifted both modes by about the same amount, and the gap between them stayed about where it was.
+
+### The control: GSM8K
+
+```{python}
+#| label: fig-gsm8k
+#| fig-cap: "GSM8K, 200 test questions, greedy, one answer per problem. Error bars are ±1 standard error (about ±2.3 points). None of the changes from step 0 is significant at p < 0.05 (McNemar, per mode)."
+fig = acc_by_step("gsm8k", "GSM8K control: AR vs diffusion", "accuracy (%)")
+fig.update_yaxes(range=[80, 95])
+show(fig)
+```
+
+GSM8K barely moves in either mode: AR goes from 87.5% to between 88.0% and 91.5%, diffusion from 86.5% to between
+87.0% and 89.5%. None of those changes from step 0 is significant. On this small control set, I did not detect a significant change in either mode. That gives me some
+reassurance about GSM8K, but it does not establish that other tasks are unaffected or that smaller gains
+and regressions are absent.
+
+## The thing that's capping both curves
+
+Remember the answers getting longer? Here's what that does at eval time.
+
+```{python}
+#| label: fig-cap
+#| fig-cap: "Number of the 500 MATH Level-5 test answers that ran into the 2,048-token budget. For AR this is the vLLM context limit (prompt + answer = 2,048); for diffusion it's 2,048 new tokens."
+fig = go.Figure()
+for m in ("ar", "diff"):
+    d = modes[(modes.task == "math-l5") & (modes["mode"] == m)].sort_values("step")
+    fig.add_trace(go.Bar(x=d.step, y=d.hit_length_cap, name=NAMES[m], marker_color=COLORS[m],
+                         hovertemplate="%{y} of 500"))
+fig.update_layout(barmode="group", bargap=0.3, bargroupgap=0.08)
+fig.update_xaxes(tickvals=sorted(modes.step.unique()))
+show(style(fig, "MATH Level 5: token limit hits", "training step (checkpoint)", "answers (of 500)"))
+```
+
+At step 0, 26 AR answers and 22 diffusion answers ran out of room. From step 50 on it's between 93 and 138 in each mode,
+so a fifth to a quarter of all answers get cut off before they reach a `\boxed{}`. I looked at the cut-off diffusion
+answers from step 75, and they aren't loops, they're just long, careful markdown solutions that run out of tokens.
+
+Both modes show substantial truncation. That makes it important to rerun with equal answer budgets
+before reading too much into the absolute AR vs diffusion gap. But the absolute numbers are held
+down for both, and RL is partly fighting its own length here: during training about a fifth of the rollouts hit the
+limit, and TRL drops those from the loss.
+
+One small unevenness I only noticed while writing this: the AR eval in vLLM had a 2,048-token *context*, so the
+answer budget was 2,048 minus the prompt (45 to 1,087 tokens), while diffusion got 2,048 new tokens. It's the same
+direction for every checkpoint, so each mode's step-by-step sweep still uses consistent settings. But answer lengths change during training, so the
+unequal budgets can also affect the measured gains. I've fixed the budget setup for the next run.
+
+## So, does it move?
+
+Yes. RL in AR mode only, on MATH, raised diffusion-mode accuracy on the same problems by about as much as it raised
+AR: 5.3 points vs 5.6 on average across checkpoints. Diffusion mode never saw a masked block during training. The
+GSM8K control had no statistically significant change in either mode; this run does not tell me how broadly
+the transfer generalizes.
+
+What it didn't do is close the gap. Diffusion started about 7 points behind AR and ended about 8 behind. Whatever the
+RL changed in the shared weights, both decoding modes read it about equally.
+
+The caveats, all next to each other:
+
+- One run, one seed, one model size (3B). The checkpoint average is descriptive, and the per-checkpoint
+  significance tests are unadjusted for multiple comparisons.
+- Greedy decoding, one answer per problem. With 500 problems that's about ±2.2 points per number.
+- Diffusion numbers come from SGLang, which scored the base model 4 points below NVIDIA's HF code on the same 300
+  problems. All checkpoints went through SGLang, so the comparison across steps is like for like.
+- From step 50 on, roughly a fifth to a quarter of the answers hit the token limit in both modes (up to
+  27.6% in AR). AR had a 2,048-token context budget; diffusion had 2,048 new tokens.
+
+<!-- TODO: next experiments (to be decided). Candidates: rerun the sweep with a 4,096-token budget; decoding sweep
+(threshold / block size) on base vs step 125; LinearSpec acceptance length as a direct "do the modes agree" measure;
+RL in diffusion mode and measure AR (the mirror experiment). -->
+
+
+## Data behind the charts
+
+The charts use the CSV exports copied from this run, so rendering this post does not need GPUs or W&B credentials:
+[checkpoint evaluations](data/modes.csv), [training metrics](data/train.csv),
+[trainer evaluations](data/train_eval.csv), and [task and engine probes](data/probes.csv).
+The paired-test p-values are recorded in the checkpoint export; the per-problem outputs are not included here.

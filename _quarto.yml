@@ -8,6 +8,8 @@ project:
     - "pages/life.qmd"
     - "posts/*.qmd"
     - "posts/posttraining_gsm8k_worklog/*.qmd"
+    - "posts/rl_ar_diffusion/*.qmd"
+    - "!blog/**"
 
 format:
   html:
