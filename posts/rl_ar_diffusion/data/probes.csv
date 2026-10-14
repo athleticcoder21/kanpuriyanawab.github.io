@@ -5,4 +5,4 @@ math-level-probe,math-l3,300,ar,vllm,0.8433,greedy; 2048 tokens
 math-level-probe,math-l4,300,ar,vllm,0.7567,greedy; 2048 tokens
 math-level-probe,math-l5,300,ar,vllm,0.5933,greedy; 2048 tokens
 math-level-probe,math-l5,300,diff,hf,0.5633,NVIDIA HF generate(); block 32; threshold 0.9; batch 1; 77 tok/s per GPU
-engine-check,math-l5,300,diff,sglang,0.5233,SGLang PR 25803 FastDiffuser; block 32; threshold 0.9; 10720 tok/s over 8 GPUs
+engine-check,math-l5,300,diff,sglang,0.5233,SGLang PR 25803 FastDiffuser; block 32; threshold 0.9; about 1340 tok/s per GPU
