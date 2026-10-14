@@ -184,7 +184,7 @@ Before trusting that, I checked it. Same prompt through the original model's AR 
 the largest logit difference was 0.0, and greedy decoding gave the exact same tokens. So for AR it *is* the same
 model, and now vLLM and TRL load it like any other LLM. To evaluate diffusion mode, I just rename the weights back.
 
-The RL itself is plain GRPO in TRL, with vLLM generating the rollouts on the same 8 H100s:
+The RL itself is plain GRPO in TRL, with vLLM generating the rollouts:
 
 - 64 problems per step, 8 answers each, so 512 rollouts per step
 - learning rate 1e-6, no KL penalty, temperature 1.0, up to 2,048 tokens per answer
@@ -254,7 +254,7 @@ I pointed `CUDA_HOME` at the one that ships in the venv. FlashInfer tried to com
 installed its prebuilt kernels the same way the PR's Dockerfile does. And pip had pulled a CUDA 13.4 compiler next to
 a 13.0 runtime, so I pinned the compiler packages back to 13.0.
 
-After that: **10,720 tokens/s over 8 GPUs**, about 1,340 per GPU, against 77 per GPU before. 300 problems in 97
+After that: about **1,340 tokens/s per GPU**, against 77 per GPU before. 300 problems in 97
 seconds.
 
 But the accuracy didn't match. On the same 300 problems SGLang got 52.3%, HF got 56.3%. Only 27 of the 300 answers

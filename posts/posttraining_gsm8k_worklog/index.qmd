@@ -277,8 +277,7 @@ than half of those right answers land where a parser can find them. Less than ha
 ## Getting the first run to train at all
 
 The cookbook is written for a single consumer GPU, so it loads the model in
-4-bit and lets `device_map="auto"` place it. I was on a node with 8×A100s, and
-my very first run crashed before step 1:
+4-bit and lets `device_map="auto"` place it. My very first run crashed before step 1:
 
 ```text
 torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 49.99 GiB.
@@ -289,10 +288,10 @@ Qwen's whole 152k-token vocabulary, for every token of every completion. With
 completions allowed up to 2,048 tokens and 8 of them per GPU, that one tensor
 is huge. GSM8K answers are about 200 tokens long, so I cut the limit to 512.
 
-I also dropped 4-bit (at 0.5B parameters it buys nothing on an A100) and
+I also dropped 4-bit (at 0.5B parameters I had enough memory without it) and
 `device_map="auto"`, which fights `accelerate` when you want one copy of the
 model per GPU. The final setup: vLLM on GPU 0 generating the rollouts, the
-other 7 GPUs training, LoRA on the cookbook's `q_proj` and `v_proj`, and the
+remaining GPUs training, LoRA on the cookbook's `q_proj` and `v_proj`, and the
 cookbook's learning rate (5e-6) and gradient clipping (0.1). I kept TRL's
 default `loss_type="dapo"` for the GRPO runs.
 
@@ -412,7 +411,7 @@ the biggest problem in this whole worklog.
 Filtering from a run's logs had a hole: it only knew about the questions that
 run happened to sample, 2,100 of 7,473. So instead of mining old rollouts, I
 wrote presampling script. Before training even starts, it generates samples for
-**every** training question (with vLLM, on all 8 GPUs, about a minute), scores
+**every** training question (with vLLM, about a minute), scores
 them, and drops the ones with no learnable signal. The point of RL is to
 amplify the signal the model already has, and a question it always gets
 right, or never gets right, has none.
@@ -820,8 +819,8 @@ should be identical:
 #| label: fig-fp32
 #| fig-cap: "First 20 steps, vLLM vs trainer mismatch. In fp32, Qwen2.5 starts at 0.0006, so the two copies are identical, then gains about 0.003 every step. Qwen3 (bf16) stays flat."
 line(
-    [("9ue7k08w", "train/sampling/sampling_logp_difference/mean", "Qwen3-0.6B, bf16, 7 GPUs"),
-     ("i7yh9cby", "train/sampling/sampling_logp_difference/mean", "Qwen2.5 fp32, 7 GPUs"),
+    [("9ue7k08w", "train/sampling/sampling_logp_difference/mean", "Qwen3-0.6B, bf16, multiple GPUs"),
+     ("i7yh9cby", "train/sampling/sampling_logp_difference/mean", "Qwen2.5 fp32, multiple GPUs"),
      ("blyv9d73", "train/sampling/sampling_logp_difference/mean", "Qwen2.5 fp32, 1 GPU"),
      ("cpgrs28e", "train/sampling/sampling_logp_difference/mean", "Qwen2.5 fp32, 1 GPU, vLLM at 25%")],
     "Mismatch over the first steps", "nats per token", max_step=20,
