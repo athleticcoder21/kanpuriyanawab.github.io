@@ -1,5 +1,5 @@
 ---
-title: "What if… I post-train a model in autoregressive mode? Does it move the needle in diffusion mode?"
+title: "Does RL in autoregressive decoding move the benchmark needle in diffusion decoding?"
 date: 2026-10-14
 description: "In this article, we take Nemotron-Labs-Diffusion-3B and post-train it for maths in autoregressive mode to observe what happens to its performance in diffusion decoding mode."
 categories: [LLMs, RL, Diffusion, Worklog]
