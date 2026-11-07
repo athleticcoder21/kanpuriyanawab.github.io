@@ -6,8 +6,9 @@ aliases:
 listing:
   sort: "date desc"
   contents:
-    - "posts"
-    - "notes"
+    - "posts/*.qmd"
+    - "posts/*/index.qmd"
+    - "notes/*.qmd"
   feed: true
   filter-ui: false
   sort-ui: false

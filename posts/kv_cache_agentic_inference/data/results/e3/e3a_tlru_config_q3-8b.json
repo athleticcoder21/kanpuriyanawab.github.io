@@ -1,0 +1,7 @@
+{
+  "threshold": 6233,
+  "next_prompt_estimate": 3270,
+  "prefill_flop_s": 350244636948644.9,
+  "held_context": 68592.85754836447,
+  "ttft_budget_s": 1.0
+}

@@ -1,0 +1,164 @@
+{
+  "model": "q35-9b",
+  "kv_dtype": "bf16",
+  "prefill": [
+    {
+      "tokens": 1024,
+      "ttft_s": [
+        0.0518994699959876,
+        0.051449970007524826,
+        0.051507128999219276
+      ]
+    },
+    {
+      "tokens": 2048,
+      "ttft_s": [
+        0.09150049700110685,
+        0.0914137760119047,
+        0.09154059599677566
+      ]
+    },
+    {
+      "tokens": 4096,
+      "ttft_s": [
+        0.1755880669952603,
+        0.17714084598992486,
+        0.17690290599421132
+      ]
+    },
+    {
+      "tokens": 8192,
+      "ttft_s": [
+        0.36881377300596796,
+        0.3595351789990673,
+        0.3602037290111184
+      ]
+    },
+    {
+      "tokens": 16384,
+      "ttft_s": [
+        0.746033401999739,
+        0.7456213330005994,
+        0.7455488720006542
+      ]
+    },
+    {
+      "tokens": 32768,
+      "ttft_s": [
+        1.607042345989612,
+        1.6078432359936414,
+        1.6099517450056737
+      ]
+    },
+    {
+      "tokens": 65536,
+      "ttft_s": [
+        3.685174376005307,
+        3.689137834007852,
+        3.6917667429952417
+      ]
+    },
+    {
+      "tokens": 120000,
+      "ttft_s": [
+        8.236920762996306,
+        8.255382442992413,
+        8.269693954003742
+      ]
+    }
+  ],
+  "decode": [
+    {
+      "batch": 1,
+      "context": 4096,
+      "step_s": 0.011771253004553728,
+      "gaps_counted": 95
+    },
+    {
+      "batch": 4,
+      "context": 4096,
+      "step_s": 0.012415542994858697,
+      "gaps_counted": 377
+    },
+    {
+      "batch": 16,
+      "context": 4096,
+      "step_s": 0.014358940999954939,
+      "gaps_counted": 1505
+    },
+    {
+      "batch": 32,
+      "context": 4096,
+      "step_s": 0.017611008996027522,
+      "gaps_counted": 3008
+    },
+    {
+      "batch": 64,
+      "context": 4096,
+      "step_s": 0.02299557699006982,
+      "gaps_counted": 6017
+    },
+    {
+      "batch": 1,
+      "context": 16384,
+      "step_s": 0.01208420300099533,
+      "gaps_counted": 95
+    },
+    {
+      "batch": 4,
+      "context": 16384,
+      "step_s": 0.01349817200389225,
+      "gaps_counted": 377
+    },
+    {
+      "batch": 16,
+      "context": 16384,
+      "step_s": 0.018587329002912156,
+      "gaps_counted": 1505
+    },
+    {
+      "batch": 32,
+      "context": 16384,
+      "step_s": 0.026050865009892732,
+      "gaps_counted": 3009
+    },
+    {
+      "batch": 64,
+      "context": 16384,
+      "step_s": 0.03992916599963792,
+      "gaps_counted": 6017
+    },
+    {
+      "batch": 1,
+      "context": 65536,
+      "step_s": 0.013170611986424774,
+      "gaps_counted": 95
+    },
+    {
+      "batch": 4,
+      "context": 65536,
+      "step_s": 0.017717998998705298,
+      "gaps_counted": 377
+    },
+    {
+      "batch": 16,
+      "context": 65536,
+      "step_s": 0.035401519999140874,
+      "gaps_counted": 1505
+    }
+  ],
+  "skipped": [
+    {
+      "batch": 32,
+      "context": 65536,
+      "reason": "exceeds KV pool"
+    },
+    {
+      "batch": 64,
+      "context": 65536,
+      "reason": "exceeds KV pool"
+    }
+  ],
+  "cmd": "/home/anshuman.mishra@zomato.com/inference/.venv/bin/python -m sglang.launch_server --model-path Qwen/Qwen3.5-9B --port 30000 --context-length 131072 --mem-fraction-static 0.85 --kv-cache-dtype bf16 --enable-metrics --disable-radix-cache",
+  "max_total_num_tokens": 1077354.0
+}

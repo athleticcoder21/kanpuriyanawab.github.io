@@ -7,3 +7,6 @@ _site/posts/assets/*.dmg
 /posts/posttraining_gsm8k_worklog/.worklog-venv/
 /posts/rl_ar_diffusion/.venv/
 blog/**
+/.venv/
+/posts/kv_cache_agentic_inference/.post-venv/
+/posts/kv_cache_agentic_inference/**/__pycache__/

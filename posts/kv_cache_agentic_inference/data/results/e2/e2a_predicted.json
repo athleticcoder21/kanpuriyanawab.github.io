@@ -1,0 +1,8 @@
+{
+  "idle_cap": 60,
+  "shared_prefix": 35456,
+  "held_context": {
+    "synthetic": 68592.85754836447,
+    "agentx": 71626.05820416872
+  }
+}

@@ -9,6 +9,8 @@ project:
     - "posts/*.qmd"
     - "posts/posttraining_gsm8k_worklog/*.qmd"
     - "posts/rl_ar_diffusion/*.qmd"
+    - "posts/kv_cache_agentic_inference/index.qmd"
+    - "!posts/kv_cache_agentic_inference/Untitled/**"
     - "!blog/**"
 
 format:

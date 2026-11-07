@@ -1,0 +1,64 @@
+[
+  {
+    "case": "inside-ttl",
+    "wait_s": 1,
+    "open": {
+      "status": 200,
+      "body": "\"diag-inside-ttl-88bec53c\""
+    },
+    "turn1": {
+      "status": 200,
+      "seconds": 1.233,
+      "prompt_tokens": 20000,
+      "cached_tokens": 0,
+      "completion_tokens": 8,
+      "finish_reason": {
+        "type": "length",
+        "length": 8
+      }
+    },
+    "turn2": {
+      "status": 200,
+      "seconds": 0.42,
+      "prompt_tokens": 24000,
+      "cached_tokens": 20000,
+      "completion_tokens": 8,
+      "finish_reason": {
+        "type": "length",
+        "length": 8
+      }
+    },
+    "close": {
+      "status": 200,
+      "body": ""
+    }
+  },
+  {
+    "case": "after-ttl",
+    "wait_s": 10,
+    "open": {
+      "status": 200,
+      "body": "\"diag-after-ttl-381a780d\""
+    },
+    "turn1": {
+      "status": 200,
+      "seconds": 1.231,
+      "prompt_tokens": 20000,
+      "cached_tokens": 0,
+      "completion_tokens": 8,
+      "finish_reason": {
+        "type": "length",
+        "length": 8
+      }
+    },
+    "turn2": {
+      "status": 400,
+      "seconds": 0.018,
+      "body": "{\"error\":{\"message\":\"Invalid request: session id diag-after-ttl-381a780d does not exist\"}}"
+    },
+    "close": {
+      "status": 200,
+      "body": ""
+    }
+  }
+]

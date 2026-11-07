@@ -1,0 +1,4 @@
+write 1 stream: 8589934592 bytes (8.6 GB, 8.0 GiB) copied, 10.3869 s, 827 MB/s
+read 1 stream: 8589934592 bytes (8.6 GB, 8.0 GiB) copied, 5.1453 s, 1.7 GB/s
+read 8 streams: 1.68 GB/s
+write 8 streams: 1.68 GB/s

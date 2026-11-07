@@ -391,6 +391,10 @@ pre code span,
   border: none;
 }
 
+.cell-output > pre code {
+  color: var(--ink) !important;
+}
+
 .home h1 {
   margin-bottom: 1.8rem;
   padding-bottom: 0.65rem;

@@ -1,0 +1,16 @@
+{
+  "predicted_hit_rate": 0.9255290500662013,
+  "sessions": 8,
+  "turns": 12,
+  "concurrency": 4,
+  "preset": {
+    "system_prefix": 35456,
+    "first_user": 8857,
+    "tool_mu": 6.722305569143169,
+    "tool_sigma": 1.8716797525657292,
+    "out_mu": 5.844652947509442,
+    "out_sigma": 1.3689165916768644
+  },
+  "max_context": 125120,
+  "requests": 90
+}

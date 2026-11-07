@@ -1,0 +1,1 @@
+[{"batch": 1, "context": 16384, "step_s": 0.013121802010573447, "gaps_counted": 95}, {"batch": 4, "context": 16384, "step_s": 0.01800574001390487, "gaps_counted": 377}, {"batch": 16, "context": 16384, "step_s": 0.03729180799564347, "gaps_counted": 1505}]
