@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 495" role="img" aria-labelledby="title desc">
+<title id="title">DSpark drafts a block using parallel features and sequential correction</title>
+<desc id="desc">The anchor and noise positions pass through three draft layers together to produce base logits for each position. The Markov kernel then corrects and samples positions in order, using the preceding token at each position. The sequence continues for up to six drafts.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#657585"/></marker></defs>
+<style>text{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;fill:#1f2933}.label{font-size:13px;font-weight:650;letter-spacing:1px;fill:#526779}.node{fill:#fff;stroke:#b9c9d7;stroke-width:1.4}.accent{fill:#fff;stroke:#8aafbd;stroke-width:1.4}.t{font-size:14px;font-weight:550;text-anchor:middle}.small{font-size:12px;fill:#526779}.link{fill:none;stroke:#657585;stroke-width:1.6;marker-end:url(#arrow);stroke-linecap:round;stroke-linejoin:round}.bus{fill:none;stroke:#8aafbd;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}</style>
+<rect x="8" y="8" width="744" height="139" rx="14" fill="#f7f9fb" stroke="#dce4ea"/>
+<text class="label" x="26" y="33">01  COMPUTE DRAFT FEATURES TOGETHER</text>
+<rect class="node" x="26" y="55" width="196" height="64" rx="8"/><text class="t" x="124" y="80">Anchor + noise</text><text class="t" x="124" y="99">positions</text>
+<rect class="node" x="282" y="55" width="196" height="64" rx="8"/><text class="t" x="380" y="80">Three MTP layers</text><text class="t" x="380" y="99">run over the block</text>
+<rect class="node" x="538" y="55" width="196" height="64" rx="8"/><text class="t" x="636" y="80">Base logits</text><text class="t" x="636" y="99">for each position</text>
+<path class="link" d="M222 87 H282"/><path class="link" d="M478 87 H538"/>
+<rect x="8" y="187" width="744" height="232" rx="14" fill="#edf6f7" stroke="#bfd6d9"/>
+<path class="bus" d="M636 119 V164 H150 M393 164 V232 M636 164 V232 M150 164 V232"/>
+<path class="link" d="M150 218 V247"/><path class="link" d="M393 218 V247"/><path class="link" d="M636 218 V247"/>
+<rect x="20" y="196" width="465" height="24" rx="3" fill="#edf6f7"/><text class="label" x="26" y="213">02  CORRECT AND SAMPLE ONE POSITION AT A TIME</text>
+<rect class="accent" x="60" y="247" width="180" height="68" rx="8"/><text class="t" x="150" y="273">Markov correction</text><text class="t" x="150" y="293">+ sample draft 1</text>
+<rect class="accent" x="303" y="247" width="180" height="68" rx="8"/><text class="t" x="393" y="273">Markov correction</text><text class="t" x="393" y="293">+ sample draft 2</text>
+<rect class="accent" x="546" y="247" width="180" height="68" rx="8"/><text class="t" x="636" y="273">Markov correction</text><text class="t" x="636" y="293">+ sample draft 3</text>
+<path class="link" d="M240 281 H303"/><path class="link" d="M483 281 H546"/>
+<text class="small" x="247" y="270">token 1</text><text class="small" x="490" y="270">token 2</text>
+<text class="small" x="150" y="345" text-anchor="middle">uses anchor</text><text class="small" x="393" y="345" text-anchor="middle">uses token 1</text><text class="small" x="636" y="345" text-anchor="middle">uses token 2</text>
+<text class="small" x="26" y="390">Continue in the same way for positions 4–6, unless confidence stops drafting early.</text>
+<text class="small" x="26" y="459">The draft layers run once for the block; the correction and sampling remain sequential.</text>
+</svg>

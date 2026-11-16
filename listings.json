@@ -2,6 +2,7 @@
   {
     "listing": "/writing.html",
     "items": [
+      "/posts/baseten_2000tps.html",
       "/posts/kv_cache_agentic_inference/index.html",
       "/posts/rl_ar_diffusion/index.html",
       "/posts/posttraining_gsm8k_worklog/index.html",

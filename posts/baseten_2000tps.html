@@ -1,0 +1,1390 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.7.31">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+<meta name="dcterms.date" content="2026-11-15">
+<meta name="description" content="A detailed source-code investigation of Baseten’s 2,000-token/s engine: speculative decoding, Blackwell rooflines, sparse experts, fused communication, model-aware prefill, and the tradeoffs behind the headline.">
+
+<title>I reverse engineered baseten’s 2000TPS inference engine – Anshuman Mishra</title>
+<style>
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+/* CSS for syntax highlighting */
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+  }
+pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+</style>
+
+
+<script src="../site_libs/quarto-nav/quarto-nav.js"></script>
+<link href="../assets/images/favicon.png" rel="icon" type="image/png">
+<script src="../site_libs/clipboard/clipboard.min.js"></script>
+<script src="../site_libs/quarto-html/quarto.js" type="module"></script>
+<script src="../site_libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="../site_libs/quarto-html/popper.min.js"></script>
+<script src="../site_libs/quarto-html/tippy.umd.min.js"></script>
+<script src="../site_libs/quarto-html/anchor.min.js"></script>
+<link href="../site_libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="../site_libs/quarto-html/quarto-syntax-highlighting-46f4cc9626f044588a66931b604fc9c8.css" rel="stylesheet" id="quarto-text-highlighting-styles">
+<script src="../site_libs/bootstrap/bootstrap.min.js"></script>
+<link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="../site_libs/bootstrap/bootstrap-10dbc3b30c56e709ef968db695ee0085.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="light">
+<script id="quarto-search-options" type="application/json">{
+  "language": {
+    "search-no-results-text": "No results",
+    "search-matching-documents-text": "matching documents",
+    "search-copy-link-title": "Copy link to search",
+    "search-hide-matches-text": "Hide additional matches",
+    "search-more-match-text": "more match in this document",
+    "search-more-matches-text": "more matches in this document",
+    "search-clear-button-title": "Clear",
+    "search-text-placeholder": "",
+    "search-detached-cancel-button-title": "Cancel",
+    "search-submit-button-title": "Submit",
+    "search-label": "Search"
+  }
+}</script>
+<script async="" src="https://www.googletagmanager.com/gtag/js?id=G-EKSMXY3E8G"></script>
+
+<script type="text/javascript">
+
+window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-EKSMXY3E8G', { 'anonymize_ip': true});
+</script>
+<script src="../site_libs/quarto-diagram/mermaid.min.js"></script>
+<script src="../site_libs/quarto-diagram/mermaid-init.js"></script>
+<link href="../site_libs/quarto-diagram/mermaid.css" rel="stylesheet">
+
+  <script src="https://cdnjs.cloudflare.com/polyfill/v3/polyfill.min.js?features=es6"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml-full.js" type="text/javascript"></script>
+
+<script type="text/javascript">
+const typesetMath = (el) => {
+  if (window.MathJax) {
+    // MathJax Typeset
+    window.MathJax.typeset([el]);
+  } else if (window.katex) {
+    // KaTeX Render
+    var mathElements = el.getElementsByClassName("math");
+    var macros = [];
+    for (var i = 0; i < mathElements.length; i++) {
+      var texText = mathElements[i].firstChild;
+      if (mathElements[i].tagName == "SPAN") {
+        window.katex.render(texText.data, mathElements[i], {
+          displayMode: mathElements[i].classList.contains('display'),
+          throwOnError: false,
+          macros: macros,
+          fleqn: false
+        });
+      }
+    }
+  }
+}
+window.Quarto = {
+  typesetMath
+};
+</script>
+
+<link rel="stylesheet" href="../site.css">
+<meta property="og:title" content="I reverse engineered baseten’s 2000TPS inference engine – Anshuman Mishra">
+<meta property="og:description" content="A detailed source-code investigation of Baseten’s 2,000-token/s engine: speculative decoding, Blackwell rooflines, sparse experts, fused communication, model-aware prefill, and the tradeoffs behind the headline.">
+<meta property="og:image" content="https://heyyanshuman.com/posts/assets/baseten_2000tps/roofline.svg">
+<meta property="og:site_name" content="Anshuman Mishra">
+<meta name="twitter:title" content="I reverse engineered baseten’s 2000TPS inference engine – Anshuman Mishra">
+<meta name="twitter:description" content="A detailed source-code investigation of Baseten’s 2,000-token/s engine: speculative decoding, Blackwell rooflines, sparse experts, fused communication, model-aware prefill, and the tradeoffs behind the headline.">
+<meta name="twitter:image" content="https://heyyanshuman.com/posts/assets/baseten_2000tps/roofline.svg">
+<meta name="twitter:creator" content="@athleticKoder">
+<meta name="twitter:card" content="summary">
+</head>
+
+<body class="quarto-light">
+
+<div id="quarto-search-results"></div>
+<!-- content -->
+<div id="quarto-content" class="quarto-container page-columns page-rows-contents page-layout-article">
+<!-- sidebar -->
+<!-- margin-sidebar -->
+    <div id="quarto-margin-sidebar" class="sidebar margin-sidebar">
+        <nav id="TOC" role="doc-toc" class="toc-active">
+    <h2 id="toc-title">On this page</h2>
+   
+  <ul class="collapse">
+  <li><a href="#the-deepseek-v4.1-flash-architecture" id="toc-the-deepseek-v4.1-flash-architecture" class="nav-link active" data-scroll-target="#the-deepseek-v4.1-flash-architecture">The DeepSeek-V4.1-Flash architecture</a></li>
+  <li><a href="#from-a-prompt-to-generated-tokens" id="toc-from-a-prompt-to-generated-tokens" class="nav-link" data-scroll-target="#from-a-prompt-to-generated-tokens">From a prompt to generated tokens</a></li>
+  <li><a href="#how-does-baseten-produce-several-tokens-per-step" id="toc-how-does-baseten-produce-several-tokens-per-step" class="nav-link" data-scroll-target="#how-does-baseten-produce-several-tokens-per-step">How does Baseten produce several tokens per step?</a></li>
+  <li><a href="#what-can-make-block-verification-cheaper-than-separate-passes" id="toc-what-can-make-block-verification-cheaper-than-separate-passes" class="nav-link" data-scroll-target="#what-can-make-block-verification-cheaper-than-separate-passes">What can make block verification cheaper than separate passes?</a></li>
+  <li><a href="#how-baseten-runs-an-attention-projection-on-the-gpu" id="toc-how-baseten-runs-an-attention-projection-on-the-gpu" class="nav-link" data-scroll-target="#how-baseten-runs-an-attention-projection-on-the-gpu">How Baseten runs an attention projection on the GPU</a></li>
+  <li><a href="#why-moe-tokens-do-not-always-share-expert-weights" id="toc-why-moe-tokens-do-not-always-share-expert-weights" class="nav-link" data-scroll-target="#why-moe-tokens-do-not-always-share-expert-weights">Why MoE tokens do not always share expert weights</a></li>
+  <li><a href="#how-does-baseten-execute-the-moe-layers" id="toc-how-does-baseten-execute-the-moe-layers" class="nav-link" data-scroll-target="#how-does-baseten-execute-the-moe-layers">How does Baseten execute the MoE layers?</a></li>
+  <li><a href="#how-gpus-exchange-results-between-model-layers" id="toc-how-gpus-exchange-results-between-model-layers" class="nav-link" data-scroll-target="#how-gpus-exchange-results-between-model-layers">How GPUs exchange results between model layers</a></li>
+  <li><a href="#how-the-engine-processes-a-million-token-prompt" id="toc-how-the-engine-processes-a-million-token-prompt" class="nav-link" data-scroll-target="#how-the-engine-processes-a-million-token-prompt">How the engine processes a million-token prompt</a></li>
+  <li><a href="#how-saved-conversation-caches-differ-from-gpu-memory-allocation" id="toc-how-saved-conversation-caches-differ-from-gpu-memory-allocation" class="nav-link" data-scroll-target="#how-saved-conversation-caches-differ-from-gpu-memory-allocation">How saved conversation caches differ from GPU memory allocation</a></li>
+  <li><a href="#which-optimizations-also-exist-in-sglang-and-vllm" id="toc-which-optimizations-also-exist-in-sglang-and-vllm" class="nav-link" data-scroll-target="#which-optimizations-also-exist-in-sglang-and-vllm">Which optimizations also exist in SGLang and vLLM?</a></li>
+  <li><a href="#tradeoffs-behind-the-speed" id="toc-tradeoffs-behind-the-speed" class="nav-link" data-scroll-target="#tradeoffs-behind-the-speed">Tradeoffs behind the speed</a></li>
+  <li><a href="#how-much-does-the-2060-tps-result-tell-us" id="toc-how-much-does-the-2060-tps-result-tell-us" class="nav-link" data-scroll-target="#how-much-does-the-2060-tps-result-tell-us">How much does the 2,060 TPS result tell us?</a></li>
+  <li><a href="#source-revisions-and-arithmetic" id="toc-source-revisions-and-arithmetic" class="nav-link" data-scroll-target="#source-revisions-and-arithmetic">Source revisions and arithmetic</a></li>
+  </ul>
+</nav>
+    </div>
+<!-- main -->
+<main class="content" id="quarto-document-content">
+<nav class="site-nav">
+  <a class="site-brand" href="../" aria-label="Anshuman Mishra home">am.</a>
+  <div class="site-links">
+    <a href="../writing.html">Writing</a>
+    <a href="../work.html">Work</a>
+    <a href="../projects.html">Projects</a>
+    <a href="../talks.html">Talks</a>
+    <a href="https://github.com/kanpuriyanawab" aria-label="GitHub">
+      <svg viewbox="0 0 97.707 97.707" aria-hidden="true">
+        <path fill-rule="evenodd" clip-rule="evenodd" d="M48.854 0C21.839 0 0 22 0 49.217c0 21.756 13.993 40.172 33.405 46.69 2.427.49 3.316-1.059 3.316-2.362 0-1.141-.08-5.052-.08-9.127-13.59 2.934-16.42-5.867-16.42-5.867-2.184-5.704-5.42-7.17-5.42-7.17-4.448-3.015.324-3.015.324-3.015 4.934.326 7.523 5.052 7.523 5.052 4.367 7.496 11.404 5.378 14.235 4.074.404-3.178 1.699-5.378 3.074-6.6-10.839-1.141-22.243-5.378-22.243-24.283 0-5.378 1.94-9.778 5.014-13.2-.485-1.222-2.184-6.275.486-13.038 0 0 4.125-1.304 13.426 5.052a46.97 46.97 0 0 1 12.214-1.63c4.125 0 8.33.571 12.213 1.63 9.302-6.356 13.427-5.052 13.427-5.052 2.67 6.763.97 11.816.485 13.038 3.155 3.422 5.015 7.822 5.015 13.2 0 18.905-11.404 23.06-22.324 24.283 1.78 1.548 3.316 4.481 3.316 9.126 0 6.6-.08 11.897-.08 13.526 0 1.304.89 2.853 3.316 2.364 19.412-6.52 33.405-24.935 33.405-46.691C97.707 22 75.788 0 48.854 0z"></path>
+      </svg>
+    </a>
+  </div>
+</nav>
+
+<header id="title-block-header" class="quarto-title-block default">
+<div class="quarto-title">
+<h1 class="title">I reverse engineered baseten’s 2000TPS inference engine</h1>
+<p class="subtitle lead">Following the Rust, CUDA, and arithmetic behind DeepSeek Ultrafast</p>
+  <div class="quarto-categories">
+    <div class="quarto-category">LLMs</div>
+    <div class="quarto-category">Inference</div>
+    <div class="quarto-category">CUDA</div>
+  </div>
+  </div>
+
+<div>
+  <div class="description">
+    A detailed source-code investigation of Baseten’s 2,000-token/s engine: speculative decoding, Blackwell rooflines, sparse experts, fused communication, model-aware prefill, and the tradeoffs behind the headline.
+  </div>
+</div>
+
+
+<div class="quarto-title-meta">
+
+    
+    <div>
+    <div class="quarto-title-meta-heading">Published</div>
+    <div class="quarto-title-meta-contents">
+      <p class="date">November 15, 2026</p>
+    </div>
+  </div>
+  
+    
+  </div>
+  
+
+
+</header>
+
+
+<p>Baseten <a href="https://x.com/baseten/status/2121373358717862213?a=jaMxDRoOsrEBue3zr3w&amp;s=20">posted that it had built an inference engine</a> for DeepSeek-V4.1-Flash in Rust and CUDA, reaching around <strong>2,060 tokens per second on eight B300 GPUs</strong>. It also reported prefilling a million tokens in roughly twelve seconds.</p>
+<p><img src="./assets/baseten_2000tps/claim.png" class="img-fluid" alt="Baseten's announcement reporting approximately 1,740 TPS on four GPUs, 2,060 TPS on eight GPUs, and a million-token prefill in roughly twelve seconds." width="640"></p>
+<p>I wanted to understand how this was possible. Getting even 500 TPS is hard. I was curious to learn about the design choices and optimizations that lead to such insanely fast inference. Lucky for us, they open sourced the code.</p>
+<section id="the-deepseek-v4.1-flash-architecture" class="level2">
+<h2 class="anchored" data-anchor-id="the-deepseek-v4.1-flash-architecture">The DeepSeek-V4.1-Flash architecture</h2>
+<p>DeepSeek-V4.1-Flash is a causal encoder-decoder model. Its first 20 layers form the encoder, and the next 20 form the decoder. The decoder uses context supplied by the encoder, while a candidate pool feeds later sparse-indexing layers. The architecture also includes mixture-of-experts (MoE) layers and DSpark, a draft model used for speculative decoding.</p>
+<p>The diagram from the <a href="https://arxiv.org/pdf/2609.19969#page=7">DeepSeek-V4.1-Flash paper</a> shows how these components fit together:</p>
+<div id="fig-deepseek-architecture" class="quarto-float quarto-figure quarto-figure-center anchored" alt="Original DeepSeek paper architecture diagram showing the causal encoder, decoder, CSA2 modes, MoE layers, Engram, shared encoder context, candidate pool, and DSpark.">
+<figure class="quarto-float quarto-float-fig figure">
+<div aria-describedby="fig-deepseek-architecture-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+<img src="./assets/baseten_2000tps/deepseek_v41_architecture.svg" class="img-fluid figure-img" alt="Original DeepSeek paper architecture diagram showing the causal encoder, decoder, CSA2 modes, MoE layers, Engram, shared encoder context, candidate pool, and DSpark.">
+</div>
+<figcaption class="quarto-float-caption-bottom quarto-float-caption quarto-float-fig" id="fig-deepseek-architecture-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+Figure&nbsp;1: DeepSeek-V4.1-Flash architecture. Reproduced from Figure 3 of the DeepSeek-AI technical report.
+</figcaption>
+</figure>
+</div>
+<p>The <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/raw/314113f8a7dadb388215396ba5fbee2c610a04d6/inference/config.json">inference configuration</a> gives the dimensions of these components:</p>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th>Component</th>
+<th>Configuration</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Target backbone</td>
+<td>40 layers, hidden dimension 5,120</td>
+</tr>
+<tr class="even">
+<td>Routed MoE</td>
+<td>384 experts per layer, 6 selected per token</td>
+</tr>
+<tr class="odd">
+<td>Expert intermediate dimension</td>
+<td>2,304</td>
+</tr>
+<tr class="even">
+<td>Attention</td>
+<td>64 heads, head dimension 512</td>
+</tr>
+<tr class="odd">
+<td>Sliding window</td>
+<td>128 tokens</td>
+</tr>
+<tr class="even">
+<td>Main KV source layers</td>
+<td>2, 8, 14, 20, using zero-based indices</td>
+</tr>
+<tr class="odd">
+<td>Sparse attention selection</td>
+<td>Index top-k of 512</td>
+</tr>
+<tr class="even">
+<td>DSpark drafter</td>
+<td>3 MTP layers, 128 experts, top-3 routing</td>
+</tr>
+<tr class="odd">
+<td>Markov correction</td>
+<td>Rank 256</td>
+</tr>
+<tr class="even">
+<td>Vocabulary</td>
+<td>129,280</td>
+</tr>
+</tbody>
+</table>
+<p>The <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/314113f8a7dadb388215396ba5fbee2c610a04d6/README.md">model description</a> also identifies shared global KV, sparse indexing, bounded sliding-window replay and Engram conditional lookup memory as architectural features. These affect how much work the engine needs to do, particularly when processing a long prompt.</p>
+<p>The model stores hundreds of billions of expert weights. How many does it use for one token?</p>
+<p>Consider just the routed feed-forward experts. With hidden dimension <span class="math inline">\(d=5120\)</span> and intermediate dimension <span class="math inline">\(h=2304\)</span>, one expert’s three matrices (gate projection <span class="math inline">\(W_1\)</span>, up projection <span class="math inline">\(W_3\)</span>, and down projection <span class="math inline">\(W_2\)</span>) contain</p>
+<p><span class="math display">\[
+P_e=3dh=3\times5120\times2304=35{,}389{,}440
+\]</span></p>
+<p>weights. The three matrices supply the two SwiGLU input projections and the output projection.</p>
+<p>Across forty layers and 384 routed experts per layer, that becomes</p>
+<p><span class="math display">\[
+40\times384\times P_e=543{,}581{,}798{,}400
+\]</span></p>
+<p>routed-expert weights. But a single target token selects six experts per layer:</p>
+<p><span class="math display">\[
+40\times6\times P_e=8{,}493{,}465{,}600.
+\]</span></p>
+<p>Those 8.49 billion weights cover only the routed experts. The model also uses shared experts, attention projections, output heads and other components. Engram adds a large lookup table, but each token accesses only selected entries.</p>
+<p><a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/README.md#L5">Baseten’s README</a> reports both the output rate and the average time for one step of the engine’s generation loop:</p>
+<table class="caption-top table">
+<thead>
+<tr class="header">
+<th>Configuration in the README</th>
+<th style="text-align: right;">Decode rate</th>
+<th style="text-align: right;">Average step time</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>4 × GB300, TP4</td>
+<td style="text-align: right;">1,740 tokens/s</td>
+<td style="text-align: right;">3.30 ms</td>
+</tr>
+<tr class="even">
+<td>8 × B300, TP8</td>
+<td style="text-align: right;">2,060 tokens/s</td>
+<td style="text-align: right;">2.71 ms</td>
+</tr>
+</tbody>
+</table>
+<p>TP4 and TP8 mean that one model execution is distributed across four or eight GPUs using tensor parallelism. These are GPUs cooperating on one request, rather than four or eight independent copies each producing that rate.</p>
+<div class="callout callout-style-default callout-note callout-titled" title="B300 vs. GB300">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+B300 vs.&nbsp;GB300
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Both use Blackwell Ultra GPUs. An <strong>HGX B300</strong> server connects eight GPUs to x86 CPUs. A <strong>GB300 NVL72</strong> rack connects 72 GPUs to NVIDIA Grace CPUs. Both use NVLink to connect their GPUs. Baseten’s “4 × GB300” result uses four GPUs from a GB300 system, not the entire rack. <a href="https://www.baseten.co/articles/nvidia-b300-vs-gb300/">More on the system differences</a>.</p>
+</div>
+</div>
+<p>The decode example generates HTML for a Tetris game, with thinking disabled in the reproduction request. The README’s million-token prefill is a separate result. It does not establish that the Tetris decode rate was achieved with a million tokens already in context.</p>
+<p>What does 2,060 tokens per second require? Dividing one second by the output rate gives an average time per emitted token:</p>
+<p><span class="math display">\[
+\frac{1000\ \mathrm{ms}}{2060\ \mathrm{tokens}}
+\approx0.485\ \mathrm{ms/token}.
+\]</span></p>
+<p>How many output tokens does the engine get from each step? We can work that out from <strong>0.485 ms per emitted token</strong>, calculated above, and <strong>2.71 ms per step</strong>, reported by Baseten.</p>
+<div class="callout callout-style-default callout-note callout-titled" title="What is step time?">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+What is step time?
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>A <strong>decode step</strong> is one run of the engine’s generation loop. The code also calls this an <strong>iteration</strong>; both terms mean the same thing. I’ll use <em>step</em> throughout this post. <strong>Step time</strong> is how long one step takes. Baseten reports an average of <strong>2.71 ms per step</strong> on eight B300 GPUs, excluding the initial prompt-processing phase (<em>prefill</em>). A step can produce more than one output token, so step time and time per token can differ.</p>
+</div>
+</div>
+<p>What happens in one step? I followed the decode loop to <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/engine/src/model.rs#L4004"><code>capture_spec</code></a> and found three main calls:</p>
+<pre class="text"><code>dspark_draft() → verify_prep(...) → spec_accept</code></pre>
+<p>The engine drafts tokens, checks them with the target model and commits the result. The reported 2,060 TPS and 2.71 ms per step imply</p>
+<p><span class="math display">\[
+2060\times0.00271\approx5.58\ \mathrm{tokens/step}.
+\]</span></p>
+<p>Each step takes an average of 2.71 ms, so the number of steps per second is</p>
+<p><span class="math display">\[
+\frac{1000\ \mathrm{ms/s}}{2.71\ \mathrm{ms/step}}
+\approx369\ \mathrm{steps/s}.
+\]</span></p>
+<p>So the engine runs about 369 steps per second, producing around 5.6 tokens each. But what are those 5.6 tokens? To understand that, we need to look more closely at what happens during speculative decoding.</p>
+<section id="what-does-acceptance-length-count" class="level3">
+<h3 class="anchored" data-anchor-id="what-does-acceptance-length-count">What does acceptance length count?</h3>
+<p>In ordinary decoding, the main model generates one token, then uses that token to generate the next one. Speculative decoding adds a smaller <em>draft model</em> that proposes several tokens ahead. The main model, also called the <em>target model</em>, then checks those proposals together.</p>
+<p>The engine commits a prefix of the draft and one additional token. If the selected prefix ends before the draft does, that additional token replaces the next draft token. For example:</p>
+<pre class="text"><code>Draft:       A  B  C  D
+Accepted:    A  B  C
+Replacement:          X
+Output:      A  B  C  X</code></pre>
+<p>The output has <strong>3 accepted draft tokens plus 1 replacement</strong>. This illustrates the count, not the acceptance algorithm: Baseten uses a block sampler that selects a prefix using probabilities, as we will see below.</p>
+<p>What if all four draft tokens are accepted? The target has also computed a distribution for the position <em>after</em> <code>D</code>, so the engine can sample one more token from it:</p>
+<pre class="text"><code>Draft:       A  B  C  D
+Accepted:    A  B  C  D
+Next token:              X
+Output:      A  B  C  D  X</code></pre>
+<p>Here the step produces <strong>4 accepted draft tokens plus 1 new token</strong>. If no draft tokens are accepted, the step still produces a replacement.</p>
+<p>The <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/server/src/request_log.rs#L217">request logger</a> calls the average number of output tokens per step the <strong>average acceptance length</strong>:</p>
+<p><span class="math display">\[
+\frac{\mathrm{accepted\ draft\ tokens}}{\mathrm{steps}}
++ 1\ \mathrm{token/step}.
+\]</span></p>
+<p>An acceptance length of <strong>5.6 tokens/step</strong> therefore means approximately <strong>4.6 accepted draft tokens/step + 1 additional token/step</strong>.</p>
+<p>The README gives 5.6 as a summary across both configurations. Dividing it by the reported step times gives about <strong>2,066 TPS</strong> at 2.71 ms and <strong>1,697 TPS</strong> at 3.30 ms, close to but not exactly the headline rates of 2,060 and 1,740 TPS. These reported summaries are approximate.</p>
+<p>The tokens from a step can also arrive together when streamed. An average of 0.485 ms per token does not mean a token arrives every 0.485 ms.</p>
+<p>How does the engine draft and verify a block in 2.71 ms? Let’s follow a request into the decode loop.</p>
+</section>
+</section>
+<section id="from-a-prompt-to-generated-tokens" class="level2">
+<h2 class="anchored" data-anchor-id="from-a-prompt-to-generated-tokens">From a prompt to generated tokens</h2>
+<p>The <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/server/src/engine.rs#L207">server’s rank workers</a> share a job. Before decoding, they check for a reusable prompt prefix, run prefill and initialize the speculative state. Each decode step then replays a <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/engine/src/model.rs#L4004">captured GPU graph</a>:</p>
+<p><img src="./assets/baseten_2000tps/decode_flow.svg" class="img-fluid" alt="Request setup, a captured speculative decode step, and the server loop for streaming and stop checks."></p>
+<p>A <strong>CUDA graph</strong> records a sequence of GPU operations so the server can launch them together. Here, one replay runs a speculative step: draft tokens, verify them, and commit the result.</p>
+<p>After each step, the server reads a snapshot of the GPU’s progress and streams any new tokens. It can launch another step while reading an earlier snapshot, so the diagram shows the flow of work rather than a strict timeline. The loop continues until the request finishes.</p>
+</section>
+<section id="how-does-baseten-produce-several-tokens-per-step" class="level2">
+<h2 class="anchored" data-anchor-id="how-does-baseten-produce-several-tokens-per-step">How does Baseten produce several tokens per step?</h2>
+<p>DeepSeek’s DSpark drafter proposes several tokens for the target to check together. This is faster only if drafting and verifying them takes less time than generating them one at a time.</p>
+<div class="callout callout-style-default callout-note callout-titled" title="Why can the target check several tokens at once?">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+Why can the target check several tokens at once?
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>During ordinary decoding, the model must sample one token before it knows the input for the next. With a draft, the proposed tokens are already available. The target can process their positions together under a causal mask, then decide which proposals to keep.</p>
+</div>
+</div>
+<p>DeepSeek includes a model-native proposer called DSpark. In this implementation, <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/engine/src/model.rs#L3664">target features are collected from layers 37, 38, and 39</a>. The preparation path projects those features and constructs the drafter’s KV context. The three small draft transformer layers, called <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/engine/src/model.rs#L3712">MTP layers</a> in the code, compute draft features for a block containing the current anchor and noise-token positions.</p>
+<p>On SM103, the Blackwell Ultra device profile, the <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/cuda/src/profile.rs#L50">configuration override</a> sets the draft limit to six tokens. To verify all six, the target model receives the current token, called the <em>anchor</em>, followed by the six draft tokens. It processes those <strong>seven tokens together</strong>.</p>
+<section id="how-does-the-engine-draft-six-tokens-without-six-draft-model-passes" class="level3">
+<h3 class="anchored" data-anchor-id="how-does-the-engine-draft-six-tokens-without-six-draft-model-passes">How does the engine draft six tokens without six draft-model passes?</h3>
+<p>The <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/engine/src/model.rs#L3712">draft path</a> runs the three MTP layers over the block together. But each proposed token still needs to account for the token sampled before it. Baseten handles that dependency in the <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/kernels/cu/draft_markov.cu#L57">Markov kernel</a>: instead of rerunning all three draft layers for each position, it adds a smaller, rank-256 correction to that position’s precomputed logits. The correction and sampling still run sequentially, and they still touch the vocabulary; the saving is avoiding another full draft-model pass for every candidate.</p>
+<p><img src="./assets/baseten_2000tps/dspark_draft_flow.svg" class="img-fluid" alt="The three draft layers process the block together, then the Markov kernel corrects and samples draft tokens in sequence using the previous token."></p>
+<div class="callout callout-style-default callout-note callout-titled" title="How the Markov correction works">
+<div class="callout-header d-flex align-content-center" data-bs-toggle="collapse" data-bs-target=".callout-4-contents" aria-controls="callout-4" aria-expanded="false" aria-label="Toggle callout">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+How the Markov correction works
+</div>
+<div class="callout-btn-toggle d-inline-block border-0 py-1 ps-1 pe-0 float-end"><i class="callout-toggle"></i></div>
+</div>
+<div id="callout-4" class="callout-4-contents callout-collapse collapse">
+<div class="callout-body-container callout-body">
+<p>For a candidate token <span class="math inline">\(v\)</span> at draft position <span class="math inline">\(r\)</span>, the correction is</p>
+<p><span class="math display">\[
+\ell_r(v)=b_r(v)+\langle e(y_{r-1}),M_v\rangle,
+\qquad q_r=\operatorname{softmax}(\ell_r/T).
+\]</span></p>
+<p>Here <span class="math inline">\(b_r\)</span> comes from the parallel draft computation, <span class="math inline">\(e(y_{r-1})\)</span> is the previous sampled token’s Markov embedding, and <span class="math inline">\(M_v\)</span> is the projection vector for vocabulary item <span class="math inline">\(v\)</span>.</p>
+<p><img src="./assets/baseten_2000tps/markov_correction.svg" class="img-fluid" alt="For each vocabulary token, the dot product of its projection vector and the previous token’s embedding is added to the base logit to produce a corrected logit."></p>
+<p>The diagram shows one draft position and three vocabulary tokens. The same previous-token embedding is used for every candidate; each candidate has its own projection vector and base logit. The corrected logits determine the distribution used to sample the next draft token.</p>
+<p>The implementation shards the vocabulary across TP ranks. Each rank evaluates its portion, combines candidate information across ranks, and agrees on the next token. For sampling it adds Gumbel noise to corrected logits and selects a maximum. Ignoring finite-precision effects, the Gumbel-max identity gives</p>
+<p><span class="math display">\[
+y_r=\arg\max_v\left(\ell_r(v)/T+G_v\right),
+\qquad G_v\sim\operatorname{Gumbel}(0,1).
+\]</span></p>
+<p>This samples from the distribution using scores that each GPU can calculate locally and then reduce across ranks. The kernel also saves the draft logits and normalization statistics needed for verification.</p>
+</div>
+</div>
+</div>
+<p>There is another reuse opportunity in the code. The <code>_ld</code> kernel loads chunks of Markov weights into shared memory before the sequential loop and reuses them across draft positions; another kernel handles shapes that cannot use this variant. This reduces repeated loading inside the draft tail, but the source alone cannot tell us how many milliseconds it saves.</p>
+<p>DSpark and the Markov head are model features, not inventions unique to Baseten. <a href="https://github.com/sgl-project/sglang/blob/a56dbcf181cfb7f395c340a093ec5a0bca22cae5/python/sglang/srt/models/deepseek_v4_dspark.py#L401">SGLang implements the same model-specific head</a>. The question for the engine is how efficiently it executes and connects that model to verification.</p>
+</section>
+<section id="can-the-engine-avoid-verifying-unpromising-drafts" class="level3">
+<h3 class="anchored" data-anchor-id="can-the-engine-avoid-verifying-unpromising-drafts">Can the engine avoid verifying unpromising drafts?</h3>
+<p>Verifying six draft tokens means processing seven token positions through the target model. If the later drafts are unlikely to be accepted, the engine can verify fewer positions instead. Baseten’s <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/engine/src/model.rs#L3842">draft tail</a> uses the model’s confidence scores to choose that number. A shorter verification can finish sooner, but it also limits how many tokens the step can produce.</p>
+<div class="callout callout-style-default callout-note callout-titled" title="How the confidence threshold works">
+<div class="callout-header d-flex align-content-center" data-bs-toggle="collapse" data-bs-target=".callout-5-contents" aria-controls="callout-5" aria-expanded="false" aria-label="Toggle callout">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+How the confidence threshold works
+</div>
+<div class="callout-btn-toggle d-inline-block border-0 py-1 ps-1 pe-0 float-end"><i class="callout-toggle"></i></div>
+</div>
+<div id="callout-5" class="callout-5-contents callout-collapse collapse">
+<div class="callout-body-container callout-body">
+<p>The kernel accumulates sigmoid confidence scores. In simplified notation,</p>
+<p><span class="math display">\[
+c_r=\sigma(a_r),\qquad C_r=\prod_{j=0}^{r}c_j.
+\]</span></p>
+<p>When cumulative confidence falls below the configured threshold, the kernel can stop drafting and select a shorter verification body. The SM103 defaults use 0.3 for TP4 and 0.2 for TP8, with reduced thresholds for the final positions. These are profile choices, not universal optimal constants.</p>
+</div>
+</div>
+</div>
+<p>How does that choice reach the target without sending the confidence score back to the CPU? <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/engine/src/model.rs#L4004"><code>capture_spec_vadapt</code></a> builds a CUDA graph with a verification branch for each supported length. The confidence kernel selects a branch on the GPU, so the CPU does not have to read the confidence score and launch a different sequence of kernels each time.</p>
+<p>The graph builder creates the branches:</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode rust code-with-copy"><code class="sourceCode rust"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> sinks <span class="op">=</span> g<span class="op">.</span>sinks()<span class="op">?;</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> bodies <span class="op">=</span> g<span class="op">.</span>add_switch(<span class="op">&amp;</span>sinks<span class="op">,</span> h<span class="op">,</span> blk <span class="kw">as</span> <span class="dt">u32</span>)<span class="op">?;</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<p>The CUDA drafter writes the branch selection:</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode cpp code-with-copy"><code class="sourceCode cpp"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a>cudaGraphSetConditional<span class="op">((</span>cudaGraphConditionalHandle<span class="op">)</span>p<span class="op">.</span>hcond<span class="op">,</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>                        <span class="op">(</span><span class="dt">unsigned</span><span class="op">)(</span>L <span class="op">-</span> <span class="dv">1</span><span class="op">));</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<p>Together, these lines let the GPU choose the verification branch within the captured graph. The host still launches each step. SGLang also has <a href="https://github.com/sgl-project/sglang/blob/a56dbcf181cfb7f395c340a093ec5a0bca22cae5/python/sglang/srt/speculative/dspark_components/dspark_planner.py#L330">confidence-aware verification planning</a>; this is a difference in the inspected execution paths, not evidence that confidence-based verification is exclusive to Baseten.</p>
+</section>
+<section id="what-happens-to-rejected-drafts" class="level3">
+<h3 class="anchored" data-anchor-id="what-happens-to-rejected-drafts">What happens to rejected drafts?</h3>
+<p>It would be tempting to explain acceptance as “compare each draft token to the target’s argmax and keep the matching prefix.” That would describe a greedy setting. This server <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/server/src/output_options.rs#L29">fixes temperature and top-p at one</a>, and its selected verification sampler uses block-wise acceptance.</p>
+<p>The <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/engine/src/model.rs#L2562">sampler setup</a> sets <code>block: 1</code>. The SM103 variant includes the shared <code>sample.cu</code> code, so we can follow the acceptance logic there.</p>
+<p>For orientation, ordinary token-wise speculative sampling accepts a proposal <span class="math inline">\(y\)</span> with probability <span class="math inline">\(\min(1,p(y)/q(y))\)</span> and corrects rejection using a normalized positive residual <span class="math inline">\([p-q]_+\)</span>. That example explains why draft probabilities are needed; it is not the complete rule used here.</p>
+<div class="callout callout-style-default callout-note callout-titled" title="Reading the actual block sampler">
+<div class="callout-header d-flex align-content-center" data-bs-toggle="collapse" data-bs-target=".callout-6-contents" aria-controls="callout-6" aria-expanded="false" aria-label="Toggle callout">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+Reading the actual block sampler
+</div>
+<div class="callout-btn-toggle d-inline-block border-0 py-1 ps-1 pe-0 float-end"><i class="callout-toggle"></i></div>
+</div>
+<div id="callout-6" class="callout-6-contents callout-collapse collapse">
+<div class="callout-body-container callout-body">
+<p>Let’s number the draft tokens <span class="math inline">\(1,\ldots,L\)</span>. At position <span class="math inline">\(i\)</span>, let <span class="math inline">\(p_i\)</span> be the target distribution and <span class="math inline">\(q_i\)</span> the draft distribution. <code>samp_stats</code> stores the log ratio of their probabilities for the proposed token:</p>
+<p><span class="math display">\[
+\lambda_i=\log p_i(y_i)-\log q_i(y_i).
+\]</span></p>
+<p>In <code>samp_block</code>, define</p>
+<p><span class="math display">\[
+s_j=\sum_{i=1}^{j}\lambda_i,\qquad
+w_j=\exp\left(s_j-\max(0,s_1,\ldots,s_j)\right),\quad w_0=1.
+\]</span></p>
+<p>That is the source’s cumulative sum, running maximum, and <code>expf(c - mx)</code>. The subtraction bounds <span class="math inline">\(w_j\)</span> by one. It is not the product of individually clipped acceptance probabilities.</p>
+<p>For position <span class="math inline">\(j&lt;L\)</span>, the kernel forms positive residual weights</p>
+<p><span class="math display">\[
+r_j(v)=[w_jp_{j+1}(v)-q_{j+1}(v)]_+,
+\qquad M_j=\sum_v r_j(v).
+\]</span></p>
+<p>Vocabulary shards contribute to the residual mass and to sampled token reductions. The acceptance tests for candidate block lengths use</p>
+<p><span class="math display">\[
+H_j=
+\begin{cases}
+1,&amp;j&lt;L\text{ and }w_j\ge1,\\
+\dfrac{M_j}{M_j+1-w_j},&amp;j&lt;L\text{ and }w_j&lt;1,\\
+w_L,&amp;j=L.
+\end{cases}
+\]</span></p>
+<p>The code ballots the passing tests and chooses the <strong>largest passing length</strong>. It does not count consecutive passing token comparisons from the beginning. At that length it selects the residual token when available, with the target draw as the fallback or full-block bonus.</p>
+<p>These equations follow the implementation; they are not a proof of its floating-point, synchronization or random-number behavior. They do show that the sampler does more than compare each draft token to the target’s argmax.</p>
+<p>Source: <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/kernels/cu/sample.cu#L685"><code>samp_stats</code> and <code>samp_block</code></a>.</p>
+</div>
+</div>
+</div>
+<p>The final <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/kernels/cu/ops.cu#L591">commit kernel</a> writes the accepted draft tokens and the sampler’s extra token. It then updates the position, counters and next anchor on the GPU for the next step.</p>
+<p>The counter updates make the rate calculation concrete:</p>
+<div class="sourceCode" id="cb6"><pre class="sourceCode cpp code-with-copy"><code class="sourceCode cpp"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a>state<span class="op">[</span><span class="dv">0</span><span class="op">]</span> <span class="op">=</span> tok<span class="op">;</span></span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>state<span class="op">[</span><span class="dv">1</span><span class="op">]</span> <span class="op">+=</span> <span class="dv">1</span><span class="op">;</span></span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a>state<span class="op">[</span><span class="dv">2</span><span class="op">]</span> <span class="op">+=</span> c<span class="op">;</span></span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a>state<span class="op">[</span><span class="dv">3</span><span class="op">]</span> <span class="op">+=</span> c <span class="op">+</span> <span class="dv">1</span><span class="op">;</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<p>Here <code>c</code> is the number of accepted draft tokens. <code>state[1]</code> counts steps, while <code>state[3]</code> counts committed tokens: the accepted drafts plus one extra token.</p>
+<p>Correctness and precision are separate questions here. A mathematically distribution-preserving sampler targets the probabilities computed by its numerical implementation. It does not make a quantized target identical to a higher-precision model. This engine can use an FP8 output head for verification at TP4, while the other profile differs. That deserves to be named when discussing output equivalence.</p>
+</section>
+<section id="when-does-speculative-decoding-increase-tokens-per-second" class="level3">
+<h3 class="anchored" data-anchor-id="when-does-speculative-decoding-increase-tokens-per-second">When does speculative decoding increase tokens per second?</h3>
+<p>The goal is not to draft the most tokens. It is to get the most <strong>committed tokens per second</strong>, including the time spent on drafting, target verification and sampling. A longer draft can improve that ratio if enough candidates are accepted; it can also make it worse by adding work that is thrown away.</p>
+<div class="callout callout-style-default callout-note callout-titled" title="The speculative decoding break-even point">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+The speculative decoding break-even point
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Divide a speculative step’s elapsed time into non-overlapping contributions from drafting, verification, sampling/commit and gaps:</p>
+<p><span class="math display">\[
+T_{\mathrm{spec}}=T_{\mathrm{draft}}+T_{\mathrm{verify}}
++T_{\mathrm{sample/commit}}+T_{\mathrm{gaps}}.
+\]</span></p>
+<p>Its useful rate is</p>
+<p><span class="math display">\[
+R_{\mathrm{spec}}=\frac{\mathbb E[K]}{\mathbb E[T_{\mathrm{spec}}]}.
+\]</span></p>
+<p>Against a matching plain one-token time <span class="math inline">\(T_{\mathrm{plain}}\)</span>, the symbolic speedup would be</p>
+<p><span class="math display">\[
+S=\frac{\mathbb E[K]T_{\mathrm{plain}}}
+{\mathbb E[T_{\mathrm{spec}}]}.
+\]</span></p>
+<p>We do not have a matching measured <span class="math inline">\(T_{\mathrm{plain}}\)</span>. Using Baseten’s reported 2.71 ms and roughly 5.6 tokens per step, the break-even plain-decoding time would be about <span class="math inline">\(2.71/5.6=0.484\)</span> ms per token. That is a threshold, not a measured baseline or speedup.</p>
+</div>
+</div>
+<p>Longer drafts can also take more time to process and may select more experts. The best length depends on how many additional tokens are accepted.</p>
+<p>How quickly can the GPU move and compute with the weights used in these steps? A roofline model gives us a way to start answering that question.</p>
+</section>
+</section>
+<section id="what-can-make-block-verification-cheaper-than-separate-passes" class="level2">
+<h2 class="anchored" data-anchor-id="what-can-make-block-verification-cheaper-than-separate-passes">What can make block verification cheaper than separate passes?</h2>
+<p>The source points to a hardware opportunity. When several token vectors use the same weights, the GPU can reuse those weights within a matrix operation instead of loading them independently for each token. But whether that actually helps depends on memory traffic, GPU utilization and, for MoE layers, which experts the tokens choose.</p>
+<p>A roofline model gives us a way to reason about the first two costs before following an actual Baseten kernel.</p>
+<div class="callout callout-style-default callout-note callout-titled" title="Roofline: compute versus memory traffic">
+<div class="callout-header d-flex align-content-center">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+Roofline: compute versus memory traffic
+</div>
+</div>
+<div class="callout-body-container callout-body">
+<p>Suppose we execute a matrix multiplication</p>
+<p><span class="math display">\[
+X_{m\times k}W_{k\times n}=Y_{m\times n}.
+\]</span></p>
+<p>Here <span class="math inline">\(m\)</span> is the number of token positions processed together. These can be positions from one speculative verification block, not necessarily separate user requests.</p>
+<p>The useful multiplication performs approximately</p>
+<p><span class="math display">\[
+F=2mkn\quad\mathrm{FLOPs}.
+\]</span></p>
+<p>Let <span class="math inline">\(Q\)</span> be the bytes transferred between GPU memory and the chip, including weights, inputs, outputs and any scales or scratch data. Actual traffic also depends on caching and tiling. The arithmetic intensity is</p>
+<p><span class="math display">\[
+I=\frac{F}{Q}\quad\mathrm{FLOPs/byte}.
+\]</span></p>
+<p>For a large matrix and a few token positions, reading the weights dominates this simplified expression. Then</p>
+<p><span class="math display">\[
+I\approx\frac{2m}{s_w}.
+\]</span></p>
+<p>For FP8 weights this is approximately <span class="math inline">\(2m\)</span> FLOPs/byte, before scale overhead. For FP4 plus one byte of scale per 32 weights,</p>
+<p><span class="math display">\[
+s_w=\frac12+\frac1{32}=\frac{17}{32}\ \mathrm{bytes/weight},
+\qquad I\approx\frac{64m}{17}.
+\]</span></p>
+<p>One token position gives only about 3.76 FLOPs per weight-byte. Seven positions sharing that same matrix give about 26.35. That is better reuse, but it does not automatically fill the GPU’s tensor cores.</p>
+<p>The roofline bound says</p>
+<p><span class="math display">\[
+P_{\mathrm{attainable}}\le
+\min(P_{\mathrm{peak}},I\,BW_{\mathrm{HBM}}).
+\]</span></p>
+<p>Equivalently, an idealized operation cannot finish sooner than</p>
+<p><span class="math display">\[
+T\ge\max\left(\frac{F}{P_{\mathrm{peak}}},\frac{Q}{BW_{\mathrm{HBM}}}\right).
+\]</span></p>
+<p>This is the framework developed in <a href="https://jax-ml.github.io/scaling-book/roofline/">All About Rooflines</a>. For this engine we also need collective latency, kernel dependencies, and shape constraints. A roofline is a lower-bound model, not a complete runtime simulator.</p>
+</div>
+</div>
+<section id="why-can-memory-bandwidth-limit-these-projections" class="level3">
+<h3 class="anchored" data-anchor-id="why-can-memory-bandwidth-limit-these-projections">Why can memory bandwidth limit these projections?</h3>
+<p>NVIDIA’s <a href="https://dam-cdn.nvd.orangelogic.com/AssetLink/1k0p832eq8r5ca0u5383ie5o4tp3bst1.pdf#page=5">October 2025 Blackwell Ultra datasheet, page 5</a> lists 8 TB/s HBM bandwidth for the GB300 configuration and 7.7 TB/s for HGX B300. Its FP8 figures are marked sparse; dividing by two gives dense peaks of 5 PFLOPS and 4.5 PFLOPS respectively. These are specification ceilings, not promised kernel throughput.</p>
+<p>For the HGX B300 FP8 example, hardware balance is</p>
+<p><span class="math display">\[
+I_* = \frac{4.5\times10^{15}}{7.7\times10^{12}}
+\approx584\ \mathrm{FLOPs/byte}.
+\]</span></p>
+<p>An FP8 projection dominated by weight reads has an intensity near 2 for one token position and 14 for seven positions. Both are far below the crossover. Even with enormous compute capacity, the GPU can spend much of its time getting weights to the cores.</p>
+<p><img src="./assets/baseten_2000tps/roofline.svg" class="img-fluid" alt="Analytical FP8 roofline using 7.7 TB/s and 4.5 PFLOPS, with one-token and seven-token dense weight-reuse examples far below the compute crossover."></p>
+<p>What does this look like for an actual projection in the engine? I followed one down to the GPU instructions.</p>
+</section>
+</section>
+<section id="how-baseten-runs-an-attention-projection-on-the-gpu" class="level2">
+<h2 class="anchored" data-anchor-id="how-baseten-runs-an-attention-projection-on-the-gpu">How Baseten runs an attention projection on the GPU</h2>
+<p>Consider <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/engine/src/model.rs#L1569"><code>tg2_wqkv</code></a>. It combines the query latent projection and the KV projection. The target configuration gives an input width of 5,120 and an output width of <span class="math inline">\(1280+512=1792\)</span>.</p>
+<p>For seven token positions, the useful matrix multiplication is</p>
+<p><span class="math display">\[
+[7,5120]\times[5120,1792]\longrightarrow[7,1792].
+\]</span></p>
+<p>It contains 9,175,040 weights and performs</p>
+<p><span class="math display">\[
+2\times7\times5120\times1792
+=128{,}450{,}560\ \mathrm{FLOPs}.
+\]</span></p>
+<p>With one-byte FP8 weight payload, its weight-only intensity is 14 FLOPs/byte. At 7.7 TB/s, reading that payload alone takes an ideal 1.19 microseconds; at 4.5 PFLOPS, its useful arithmetic takes an ideal 0.029 microseconds. Neither is a prediction of kernel duration. The disparity explains why memory delivery, tile shape, launch/dependency costs and the fused surrounding work deserve more attention than the headline FLOPS.</p>
+<p>The <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/engine/src/weights.rs#L382">weight loader</a> builds this fused projection without splitting its output channels by rank. Other projections are split across heads, groups or intermediate dimensions, so we cannot divide every operation by the number of GPUs.</p>
+<p>The engine chooses how to split the operation for the matrix shape and GPU. The <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/engine/src/ops.rs#L1260">kernel</a> uses tensor-map descriptors for asynchronous transfers. At the hardware level, <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/kernels/cu/tc.cuh#L55"><code>tc.cuh</code></a> stages tiles in shared memory and uses Blackwell tensor memory for the tensor-core path. Barriers coordinate transfers and computation, allowing them to overlap when dependencies permit.</p>
+<p>The MMA wrapper’s assembly string identifies the hardware operation directly:</p>
+<pre class="text"><code>tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale</code></pre>
+<section id="how-fusion-can-reduce-memory-transfers-and-kernel-launches" class="level3">
+<h3 class="anchored" data-anchor-id="how-fusion-can-reduce-memory-transfers-and-kernel-launches">How fusion can reduce memory transfers and kernel launches</h3>
+<p>The GEMV interfaces have options for normalization, quantized output, RoPE, split outputs and sampling records. In attention, the engine can combine query projection with normalization, RoPE and KV processing. The output projection can also prepare a packed input for the next operation and, on supported paths, write into the collective’s mailbox.</p>
+<p>Suppose an unfused pipeline materializes a BF16 <span class="math inline">\(m\times d\)</span> intermediate and the next stage rereads it. Removing one complete write/read pair saves</p>
+<p><span class="math display">\[
+\Delta Q=2md\times2\ \mathrm{bytes}.
+\]</span></p>
+<p>For <span class="math inline">\(m=7,d=5120\)</span>, that saves 143,360 bytes. Fusion can also remove a kernel launch or a wait between operations. Those savings matter when many small operations run one after another.</p>
+<p>Fusion has costs too. Larger kernels can need more registers and shared memory, restrict co-residency, or become specialized to shapes that fit their synchronization scheme. The source contains shared-memory budgets, supported-shape tests and fallback paths for precisely this kind of constraint. A fused kernel is not automatically better at every size.</p>
+<p>The projection above uses the same weights for every token position. Does that still hold inside the model’s mixture-of-experts layers?</p>
+</section>
+</section>
+<section id="why-moe-tokens-do-not-always-share-expert-weights" class="level2">
+<h2 class="anchored" data-anchor-id="why-moe-tokens-do-not-always-share-expert-weights">Why MoE tokens do not always share expert weights</h2>
+<p>For a dense projection, seven token vectors all multiply the same weight matrix. An MoE layer chooses experts separately for each token. Seven tokens can select seven different sets of matrices.</p>
+<p>Let <span class="math inline">\(a=6\)</span> be the selected experts per token, <span class="math inline">\(m\)</span> the number of token positions, and <span class="math inline">\(n_e\)</span> the number of tokens assigned to expert <span class="math inline">\(e\)</span>. If <span class="math inline">\(U\)</span> distinct experts are touched, then</p>
+<p><span class="math display">\[
+\sum_e n_e=ma,\qquad
+F_{\mathrm{routed}}=2P_e ma.
+\]</span></p>
+<p>Under an idealized one-fetch-per-touched-expert assumption, weight traffic is</p>
+<p><span class="math display">\[
+Q_{\mathrm{weights}}\approx s_wP_eU,
+\qquad I_{\mathrm{weights}}\approx\frac{2ma}{s_wU}.
+\]</span></p>
+<p>For seven token positions there are two useful extremes:</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 27%">
+<col style="width: 36%">
+<col style="width: 36%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Routing across seven tokens</th>
+<th style="text-align: right;">Distinct experts <span class="math inline">\(U\)</span></th>
+<th style="text-align: right;">Useful FLOPs per logical weight-byte</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>All tokens choose the same six</td>
+<td style="text-align: right;">6</td>
+<td style="text-align: right;">26.35</td>
+</tr>
+<tr class="even">
+<td>All selections are disjoint</td>
+<td style="text-align: right;">42</td>
+<td style="text-align: right;">3.76</td>
+</tr>
+</tbody>
+</table>
+<div class="callout callout-style-default callout-note callout-titled" title="A toy model of expert reuse">
+<div class="callout-header d-flex align-content-center" data-bs-toggle="collapse" data-bs-target=".callout-9-contents" aria-controls="callout-9" aria-expanded="false" aria-label="Toggle callout">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+A toy model of expert reuse
+</div>
+<div class="callout-btn-toggle d-inline-block border-0 py-1 ps-1 pe-0 float-end"><i class="callout-toggle"></i></div>
+</div>
+<div id="callout-9" class="callout-9-contents callout-collapse collapse">
+<div class="callout-body-container callout-body">
+<p>For a hypothetical independent uniform router, the probability an expert is never selected is <span class="math inline">\((1-6/384)^7\)</span>. Therefore,</p>
+<p><span class="math display">\[
+\mathbb E[U]=384\left[1-\left(1-\frac6{384}\right)^7\right]
+\approx40.08.
+\]</span></p>
+<p>This gives about 3.94 FLOPs per byte when dividing expected work by expected weight traffic. Actual routes can be correlated, and a kernel can fetch weights more than once.</p>
+</div>
+</div>
+</div>
+<p><img src="./assets/baseten_2000tps/moe_reuse.svg" class="img-fluid" alt="Analytical routed-expert weight traffic relative to one token, for identical, independent-uniform, and disjoint routes as the number of token positions increases."></p>
+<p>The target can verify several token positions together, but those positions may need different experts. That limits how much expert-weight traffic they can share. Other work, such as dense projections, scheduling and communication, can still be shared across the verification block.</p>
+<section id="estimating-the-time-to-read-expert-weights-from-gpu-memory" class="level3">
+<h3 class="anchored" data-anchor-id="estimating-the-time-to-read-expert-weights-from-gpu-memory">Estimating the time to read expert weights from GPU memory</h3>
+<p>The logical routed-expert bytes associated with one target token across forty layers are</p>
+<p><span class="math display">\[
+8{,}493{,}465{,}600\times\frac{17}{32}
+=4{,}512{,}153{,}600\ \mathrm{bytes}.
+\]</span></p>
+<p>That is about 4.51 GB, including the logical FP4 scale overhead but excluding layout padding, activations, shared experts, attention, and everything else.</p>
+<p>If those weights are read from HBM once, perfectly balanced across four GB300 GPUs at 8 TB/s each, the ideal component floor is</p>
+<p><span class="math display">\[
+\frac{4.512\times10^9}{4\times8\times10^{12}}
+\approx0.141\ \mathrm{ms}.
+\]</span></p>
+<p>For eight HGX B300 GPUs at 7.7 TB/s each, it is approximately 0.073 ms. For a seven-token verification block, the uniform-router model multiplies the single-token weight traffic by <span class="math inline">\(40.08/6\approx6.68\)</span>, giving about <strong>0.489 ms</strong> for that routed-weight component on TP8.</p>
+<p>This estimate assumes the weights come from HBM, work is perfectly balanced, and each needed expert is fetched once. Caching could reduce the HBM reads; layout and scheduling could increase them. We have also left out the drafter, attention, other matrices, sampling and synchronization.</p>
+<p>The estimate is small enough that 2.71 ms per step is plausible. It does not predict the full step time: we would need to account for the rest of the work and its dependencies.</p>
+</section>
+</section>
+<section id="how-does-baseten-execute-the-moe-layers" class="level2">
+<h2 class="anchored" data-anchor-id="how-does-baseten-execute-the-moe-layers">How does Baseten execute the MoE layers?</h2>
+<p>This line in <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/engine/src/model.rs#L1113"><code>sgl_init</code></a> is unusually direct:</p>
+<div class="sourceCode" id="cb8"><pre class="sourceCode rust code-with-copy"><code class="sourceCode rust"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="st">"sgl moe: {} layers on SGLang's low-batch MoE chain"</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<p>That is the source’s description of its own path. The <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/engine/src/weights.rs#L382">loader</a> enables SGL packing for the supported target shapes, and <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/engine/src/ops.rs#L801"><code>sgl_moe_on</code></a> enables the path for the SM103 TP4 and TP8 profiles. The target uses it at both sizes; the drafter’s SGL path has an additional TP8 gate.</p>
+<p>The engine runs without the SGLang runtime, but its code explicitly identifies this MoE chain with SGLang. The README also says the agents optimizing its kernels could read SGLang and FlashInfer. I haven’t traced the exact history of each kernel, so I won’t claim which lines came from where.</p>
+<p>The <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/engine/src/model.rs#L1148">active call chain</a> is</p>
+<pre class="text"><code>weights.rs selects SGL layout
+  → ffn_sgl builds routing/GEMM arguments
+    → sgl_moe_launch
+      → router
+      → GEMM1: input projections and activation
+      → GEMM2: output projection
+    → communication/finalization boundary</code></pre>
+<p>The router picks experts and prepares their inputs, weights and work records. GEMM1 runs the two input projections, applies clamped SwiGLU and quantizes the result. GEMM2 uses that result to produce the expert outputs. The chain also handles the shared expert. The next communication stage can then combine the expert outputs using the routing weights, without a separate finalization pass first.</p>
+<p>These kernels are designed to work together. The router prepares the layout that the GEMMs need, and the collective can consume their output directly.</p>
+<section id="how-does-basetens-moe-path-compare-with-basic-sglang" class="level3">
+<h3 class="anchored" data-anchor-id="how-does-basetens-moe-path-compare-with-basic-sglang">How does Baseten’s MoE path compare with basic SGLang?</h3>
+<p>The key finding is more specific than “Baseten has a fast MoE kernel and SGLang does not.” At the pinned SGLang revision, the <a href="https://github.com/sgl-project/sglang/blob/a56dbcf181cfb7f395c340a093ec5a0bca22cae5/python/sglang/srt/environ.py#L1043">specialized CUDA MXFP4 decode MoE switch</a> defaults to <strong>false</strong>. When enabled, its <a href="https://github.com/sgl-project/sglang/blob/a56dbcf181cfb7f395c340a093ec5a0bca22cae5/python/sglang/srt/layers/moe/moe_runner/flashinfer_trtllm.py#L1415">dispatch checks</a> also require a supported GPU, expert shape, activation and precision. On eligible paths it uses a routing kernel followed by a persistent FC1/FC2 kernel; otherwise that conditional path is not selected. The exact fallback depends on the chosen backend and layer.</p>
+<p>For Baseten’s supported SM103 TP4/TP8 target profiles, the loader and dispatch select its SGL-labeled low-batch MoE chain. Its router prepares records for the expert GEMMs, and its communication path can consume the expert outputs for finalization. This gives Baseten a concrete <strong>integration choice</strong>: the low-token-count expert path and the next communication boundary are designed together for this model and these shapes. It does <strong>not</strong> prove the SGLang kernel is absent, that the implementations are identical, or how much faster either path is.</p>
+<p>The broader comparison changes if SGLang is configured for the same job. Its <a href="https://github.com/sgl-project/sglang/blob/a56dbcf181cfb7f395c340a093ec5a0bca22cae5/python/sglang/srt/arg_groups/fields/spec.py#L31">speculative algorithm field</a> defaults to <code>None</code>, while Baseten’s decode path uses DSpark. SGLang also supports <a href="https://github.com/sgl-project/sglang/blob/a56dbcf181cfb7f395c340a093ec5a0bca22cae5/python/sglang/srt/models/deepseek_v4_dspark.py#L401">DSpark</a> when configured, so an apples-to-apples investigation must test both a basic setup and one with DSpark and eligible low-batch MoE enabled. Match model, GPU count, precision, prompt, output length and sampling too. No matched timings are available here, so the code identifies differences in execution, not a measured TPS gap.</p>
+</section>
+<section id="how-splitting-experts-across-gpus-affects-memory-usage" class="level3">
+<h3 class="anchored" data-anchor-id="how-splitting-experts-across-gpus-affects-memory-usage">How splitting experts across GPUs affects memory usage</h3>
+<p>At TP4, each expert’s intermediate dimension is <span class="math inline">\(2304/4=576\)</span> per GPU; at TP8 it is <span class="math inline">\(2304/8=288\)</span>. Padding means that halving the useful channels does not halve packed storage.</p>
+<div class="callout callout-style-default callout-note callout-titled" title="Expert packing at TP4 and TP8">
+<div class="callout-header d-flex align-content-center" data-bs-toggle="collapse" data-bs-target=".callout-10-contents" aria-controls="callout-10" aria-expanded="false" aria-label="Toggle callout">
+<div class="callout-icon-container">
+<i class="callout-icon"></i>
+</div>
+<div class="callout-title-container flex-fill">
+Expert packing at TP4 and TP8
+</div>
+<div class="callout-btn-toggle d-inline-block border-0 py-1 ps-1 pe-0 float-end"><i class="callout-toggle"></i></div>
+</div>
+<div id="callout-10" class="callout-10-contents callout-collapse collapse">
+<div class="callout-body-container callout-body">
+<p>The <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/model/src/packing.rs#L68">packing functions</a> align the W13 side to 128 channels and the W2 input-channel payload to 64. We can calculate the allocated packed bytes for one expert’s two buffers from the actual formulas:</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 15%">
+<col style="width: 21%">
+<col style="width: 21%">
+<col style="width: 21%">
+<col style="width: 21%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Configuration</th>
+<th style="text-align: right;">Logical channels per rank</th>
+<th style="text-align: right;">W13 padded channels</th>
+<th style="text-align: right;">W2 payload channels</th>
+<th style="text-align: right;">Packed bytes per rank</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>TP4</td>
+<td style="text-align: right;">576</td>
+<td style="text-align: right;">640</td>
+<td style="text-align: right;">576</td>
+<td style="text-align: right;">5,058,560</td>
+</tr>
+<tr class="even">
+<td>TP8</td>
+<td style="text-align: right;">288</td>
+<td style="text-align: right;">384</td>
+<td style="text-align: right;">320</td>
+<td style="text-align: right;">2,969,600</td>
+</tr>
+</tbody>
+</table>
+<p>The unpadded FP4-plus-scale expert is 18,800,640 bytes globally. Multiplying the packed buffers by the rank count gives about 20.23 MB at TP4 and 23.76 MB at TP8: approximately <strong>7.6% and 26.4% storage overhead</strong> respectively.</p>
+<p>These are allocated bytes, not necessarily bytes read for every token.</p>
+</div>
+</div>
+</div>
+<p>The decoder kernels explicitly support a small range of token counts. <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/engine/src/model.rs#L2449"><code>moe_rows_ok</code></a> rejects unsupported verification shapes on the tensor-core paths, in part to prevent silently switching to different numerics. The code is not trying to make one kernel equally good for one token and a large prefill batch.</p>
+<p>The repository also contains <code>tmoe_fused</code> and separate prefill kernels. The loader and dispatch branches tell us which path is selected for a given configuration.</p>
+<p>Each GPU computes only part of the work. Those results also need to be combined, so the next question is how much communication sits between the layers.</p>
+</section>
+</section>
+<section id="how-gpus-exchange-results-between-model-layers" class="level2">
+<h2 class="anchored" data-anchor-id="how-gpus-exchange-results-between-model-layers">How GPUs exchange results between model layers</h2>
+<p>Tensor parallelism reduces some local matrix work, but ranks must combine partial results. Repeating that combination at attention and feed-forward boundaries creates dependencies between layers.</p>
+<p>A useful communication model is</p>
+<p><span class="math display">\[
+T_{\mathrm{collective}}\approx
+a(p)\alpha+\frac{V(p)}{BW_{\mathrm{effective}}}+T_{\mathrm{local}}.
+\]</span></p>
+<p>Here <span class="math inline">\(a(p)\)</span> is the number of latency-bearing phases, <span class="math inline">\(\alpha\)</span> is the phase latency, and <span class="math inline">\(V(p)\)</span> is traffic on the bottleneck link or resource. The payload’s logical size alone does not determine <span class="math inline">\(V(p)\)</span>: the algorithm may replicate, reduce or exchange it in several stages.</p>
+<p>In <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/engine/src/model.rs#L1909"><code>comm_ex</code></a>, the selected path can use NVLink multicast buffers, profile-specific attention/FFN kernels, and specialized producer-push or Lamport-related communication variants. Its <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/kernels/cu/variant_zcomm_dec.cu#L4">CUDA implementations</a> combine arrival detection, reduction, and surrounding computation. This avoids treating communication as an isolated library call between separately materialized tensors.</p>
+<section id="combining-gpu-communication-with-layer-operations" class="level3">
+<h3 class="anchored" data-anchor-id="combining-gpu-communication-with-layer-operations">Combining GPU communication with layer operations</h3>
+<p>The model uses mHC residual mixing, with four residual streams in its configuration. Beyond summing TP partials, a boundary may need to combine routed and shared expert outputs, apply residual mixing, and prepare the next sublayer’s input.</p>
+<p>The FFN path passes expert output buffers, routing/permutation records, shared output and mHC state to the communication path. An eligible attention output projection can publish into the receive mailbox directly. The corresponding consumer checks the producer’s completion state before consuming the payload.</p>
+<div class="cell" data-layout-align="default">
+<div class="cell-output-display">
+<div>
+<p></p><figure class="figure"><p></p>
+<div>
+<pre class="mermaid mermaid-js">flowchart LR
+    A[Local projection or expert outputs] --&gt; B[Publish payload and readiness]
+    B --&gt; C[Cross-rank reduction]
+    C --&gt; D[Weighted finalization / residual mixing]
+    D --&gt; E[Next sublayer input]
+</pre>
+</div>
+<p></p></figure><p></p>
+</div>
+</div>
+</div>
+<p>These are logical dependencies, not necessarily separate launches. By writing data in a form the collective can consume, the producer can avoid copies and waits.</p>
+<p>The <code>griddepcontrol</code> helpers implement <strong>programmatic dependent launch</strong>, or PDL. A producer can make a dependent kernel eligible before it has completely finished, while the dependent kernel waits at the point required by the protocol. Work such as loading weights can then overlap with remaining producer work. This does not authorize reading unfinished output; correctness still depends on the explicit waits and publication conditions.</p>
+<p>Side streams serve a related purpose. Indexer/compressor work, mHC calculations and Engram preparation can start before their results are first needed. The main path joins them at their consumers. Whether this saves time depends on available SM and memory resources. If both kernels need a resource that is already saturated, running them on separate streams will not make the work disappear.</p>
+</section>
+<section id="why-eight-gpus-do-not-necessarily-double-decode-speed" class="level3">
+<h3 class="anchored" data-anchor-id="why-eight-gpus-do-not-necessarily-double-decode-speed">Why eight GPUs do not necessarily double decode speed</h3>
+<p>The headline ratio is</p>
+<p><span class="math display">\[
+\frac{2060}{1740}\approx1.184.
+\]</span></p>
+<p>It is not a clean strong-scaling experiment: the platform labels, thresholds, draft MoE path, output-head choice and other profile decisions differ. But the code gives good reasons not to expect a factor of two. Some projections and state are replicated; communication remains; small local dimensions pad; and the serial draft/verification chain still exists.</p>
+<p>An overall step has both resource constraints and a critical path. We can lower-bound it using compute and traffic, but the longest chain of dependent operations also matters:</p>
+<p><span class="math display">\[
+T_{\mathrm{step}}\ge
+\max\left(T_{\mathrm{resource\ floors}},T_{\mathrm{critical\ path}}\right).
+\]</span></p>
+<p>A single roofline for all the model’s FLOPs and bytes would miss the order in which operations depend on each other. Adding every kernel duration is not enough either, because some kernels overlap. We need to consider both the dependencies and the resources the kernels share.</p>
+<p>That explains the path for generating output. The announcement also makes a separate claim about processing long prompts, so let’s follow the prefill path next.</p>
+</section>
+</section>
+<section id="how-the-engine-processes-a-million-token-prompt" class="level2">
+<h2 class="anchored" data-anchor-id="how-the-engine-processes-a-million-token-prompt">How the engine processes a million-token prompt</h2>
+<p>The separate prefill result is one of the most interesting parts of the repository. It is easy to read it as “the kernels process a million tokens through forty layers in twelve seconds.” The code does something more model-specific.</p>
+<p>In <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/engine/src/model.rs#L2304"><code>prefill_inner</code></a>, <code>dec0</code> is half the target layer count. The function checks the architecture’s window and source-layer invariants, then streams prompt chunks through the first twenty layers. It constructs the layer-20 source KV and saves the encoder’s recent output in a tail buffer.</p>
+<p>Next, <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/engine/src/model.rs#L2238"><code>replay_decoder</code></a> restores the encoder outputs for the most recent 128 tokens and executes the remaining twenty layers over those token positions, using the available source KV.</p>
+<p>An abridged reconstruction of the control flow is:</p>
+<div class="sourceCode" id="cb10"><pre class="sourceCode rust code-with-copy"><code class="sourceCode rust"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a><span class="co">// Schematic: error handling, cache restoration and metadata omitted.</span></span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> chunk <span class="kw">in</span> prompt_chunks <span class="op">{</span></span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a>    forward_impl(chunk<span class="op">,</span> <span class="dv">0</span><span class="op">,</span> <span class="dv">20</span><span class="op">,</span> <span class="co">/* embed */</span> <span class="cn">true</span><span class="op">,</span> <span class="co">/* head */</span> <span class="cn">false</span>)<span class="op">;</span></span>
+<span id="cb10-4"><a href="#cb10-4" aria-hidden="true" tabindex="-1"></a>    stream_kv_source(<span class="dv">20</span><span class="op">,</span> chunk)<span class="op">;</span></span>
+<span id="cb10-5"><a href="#cb10-5" aria-hidden="true" tabindex="-1"></a>    stash_tail(chunk)<span class="op">;</span></span>
+<span id="cb10-6"><a href="#cb10-6" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span>
+<span id="cb10-7"><a href="#cb10-7" aria-hidden="true" tabindex="-1"></a>replay_decoder(last_128_outputs<span class="op">,</span> <span class="dv">20</span><span class="op">,</span> <span class="dv">40</span>)<span class="op">;</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<p>Why can it omit decoder execution for older prompt tokens? In a conventional Transformer, each layer builds global KV from its own preceding hidden states. Old hidden states can be required to construct later layers’ attention state. Here the decoder’s global KV is sourced from the encoder side. That removes one dependency, but leaves the decoder’s local sliding-window state to reconstruct.</p>
+<p>The paper’s Section 3.2.2 makes an important distinction: replaying only the last window <strong>approximates</strong> that local state. Dependencies accumulate across decoder layers, so exact reconstruction would need a longer replay. The bounded version truncates local attention at the replay boundary. DeepSeek reports little quality degradation in its evaluations, but the result is not mathematically identical to a full decoder forward pass. <a href="https://arxiv.org/pdf/2609.19969#page=20">Source: SWA Bounded Replay</a>.</p>
+<p>The source-sharing structure and local-window rules are essential to this tradeoff. The engine explicitly checks them. An unrelated decoder-only model would not inherit the same justification for skipping its decoder work.</p>
+<p>We can count token positions processed by each layer as a simple work proxy. A conventional full-layer schedule over <span class="math inline">\(N\)</span> prompt tokens would perform <span class="math inline">\(40N\)</span> layer-token evaluations. This schedule has</p>
+<p><span class="math display">\[
+20N+20\min(N,128)
+\]</span></p>
+<p>backbone layer-token evaluations, plus source-KV construction and other work. At <span class="math inline">\(N=1{,}000{,}000\)</span>:</p>
+<p><span class="math display">\[
+40N=40{,}000{,}000,\qquad
+20N+20\times128=20{,}002{,}560.
+\]</span></p>
+<p>The ratio is about 0.500064. That is nearly half the layer-token evaluations. It is not proof of an exact twofold reduction in FLOPs or time: different layers do different attention/indexing work, and replay has its own overhead.</p>
+<p>This gives us an explanation that faster matmuls alone would miss: the engine uses a shorter prefill schedule, accepting approximate local state. The opportunity comes partly from the model design; SGLang also has <a href="https://github.com/sgl-project/sglang/blob/a56dbcf181cfb7f395c340a093ec5a0bca22cae5/python/sglang/srt/models/deepseek_v4_replay_tail.py#L139">decoder-tail replay machinery</a>.</p>
+<section id="how-sparse-attention-selects-past-context" class="level3">
+<h3 class="anchored" data-anchor-id="how-sparse-attention-selects-past-context">How sparse attention selects past context</h3>
+<p>The target combines a local window with selected compressed global KV. The <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/engine/src/model.rs#L2747">indexer</a> scores candidates, and later decoder layers can reuse a candidate pool. Sparse attention reduces the entries read by attention, but selecting them still requires computation and cache management.</p>
+</section>
+</section>
+<section id="how-saved-conversation-caches-differ-from-gpu-memory-allocation" class="level2">
+<h2 class="anchored" data-anchor-id="how-saved-conversation-caches-differ-from-gpu-memory-allocation">How saved conversation caches differ from GPU memory allocation</h2>
+<p>The server can retain conversation state and transfer it between replicas, avoiding recomputation of a reusable prefix. The <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/engine/src/kvstore.rs#L313">snapshot encoder</a> stores compact source state and a bounded tail; the <a href="https://github.com/basetenlabs/deepseek-ultrafast/blob/76766a97308bfd1658fb055e835d0f92de737dc3/crates/engine/src/model.rs#L687">GPU allocator</a> reserves separate buffers for active inference. A small saved snapshot therefore does not imply equally small live GPU memory use. Whether restoring it is faster than recomputation depends on the prefix, cache location and network.</p>
+</section>
+<section id="which-optimizations-also-exist-in-sglang-and-vllm" class="level2">
+<h2 class="anchored" data-anchor-id="which-optimizations-also-exist-in-sglang-and-vllm">Which optimizations also exist in SGLang and vLLM?</h2>
+<p>The earlier MoE comparison shows that a basic SGLang configuration and Baseten do not necessarily select the same execution path. SGLang also implements <a href="https://github.com/sgl-project/sglang/blob/a56dbcf181cfb7f395c340a093ec5a0bca22cae5/python/sglang/srt/models/deepseek_v4_dspark.py#L401">DSpark</a>, <a href="https://github.com/sgl-project/sglang/blob/a56dbcf181cfb7f395c340a093ec5a0bca22cae5/python/sglang/srt/speculative/dspark_components/dspark_planner.py#L330">confidence-aware verification</a>, <a href="https://github.com/sgl-project/sglang/blob/a56dbcf181cfb7f395c340a093ec5a0bca22cae5/python/sglang/srt/speculative/dspark_components/dspark_sampling_accept_graph.py#L128">capturable sampling and acceptance</a>, and <a href="https://github.com/sgl-project/sglang/blob/a56dbcf181cfb7f395c340a093ec5a0bca22cae5/python/sglang/srt/models/deepseek_v4_replay_tail.py#L139">decoder-tail replay</a>. Their availability does not mean they are all enabled in a given run.</p>
+<p>vLLM has an opt-in <a href="https://github.com/vllm-project/vllm/blob/9bc16ae6a34b1e0fe260e8d12b98568478bf38c3/vllm/models/deepseek_v41/nvidia/specialized_decode/__init__.py#L82">DeepSeek-V4.1 <code>latency_specialized</code> backend</a> with small-token-count kernels, fused boundaries and <a href="https://github.com/vllm-project/vllm/blob/9bc16ae6a34b1e0fe260e8d12b98568478bf38c3/vllm/models/deepseek_v41/nvidia/specialized_decode/sampling/sharded_markov.py#L188">vocabulary-sharded Markov sampling</a>. It has specific hardware and configuration requirements; its default <code>auto</code> setting uses the stock path. The <a href="https://github.com/vllm-project/vllm/blob/9bc16ae6a34b1e0fe260e8d12b98568478bf38c3/recipes/models/deepseek-ai/DeepSeek-V4.1-Flash.yaml#L866">B300 TP4 recipe</a> describes a specialized deployment.</p>
+<p>These implementations show that the underlying techniques are not exclusive to Baseten. The source reveals different configurations and integration choices, but without matched measurements it does not establish a TPS ranking.</p>
+</section>
+<section id="tradeoffs-behind-the-speed" class="level2">
+<h2 class="anchored" data-anchor-id="tradeoffs-behind-the-speed">Tradeoffs behind the speed</h2>
+<p>Baseten specializes the engine to this model, a small range of token counts and Blackwell GPU profiles. That enables tailored layouts, kernels and graph branches, but a different model or shape may need different paths. The API also restricts temperature and top-p to one.</p>
+<p>The worker loop serves one shared generation job at a time. The reported decode rate therefore does not tell us aggregate throughput, queueing latency or cost per token under concurrent load. Speculation also depends on draft acceptance: candidates that are not committed still consume GPU time.</p>
+<p>Precision and prefill matter too. The engine uses FP4, FP8 and higher-precision operations in different places, with output-head choices that vary by profile. The bounded prefill replay reconstructs local state approximately. Neither choice should be treated as identical to every possible reference configuration.</p>
+</section>
+<section id="how-much-does-the-2060-tps-result-tell-us" class="level2">
+<h2 class="anchored" data-anchor-id="how-much-does-the-2060-tps-result-tell-us">How much does the 2,060 TPS result tell us?</h2>
+<p>The source shows how the result can come from several mechanisms working together: DeepSeek’s sparse architecture and DSpark drafter, low-precision weights, GPU-side verification, kernels designed for small token counts, and fused communication. The reported 2,060 TPS corresponds to about 5.6 output tokens per 2.71 ms step.</p>
+<p>This is substantial specialization, and the code itself identifies one active MoE chain with SGLang. It does not establish how much faster Baseten is than a matched SGLang or vLLM deployment, or how the result generalizes to other prompts and loads. Those questions need measurements under the same conditions.</p>
+</section>
+<section id="source-revisions-and-arithmetic" class="level2">
+<h2 class="anchored" data-anchor-id="source-revisions-and-arithmetic">Source revisions and arithmetic</h2>
+<p>This article studies the following snapshots, rather than assuming that a moving <code>main</code> branch always behaves the same way:</p>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 50%">
+<col style="width: 50%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Source</th>
+<th>Revision</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Baseten DeepSeek Ultrafast</td>
+<td><code>76766a97308bfd1658fb055e835d0f92de737dc3</code></td>
+</tr>
+<tr class="even">
+<td>SGLang</td>
+<td><code>a56dbcf181cfb7f395c340a093ec5a0bca22cae5</code></td>
+</tr>
+<tr class="odd">
+<td>vLLM, targeted source inspection</td>
+<td><code>9bc16ae6a34b1e0fe260e8d12b98568478bf38c3</code></td>
+</tr>
+<tr class="even">
+<td>DeepSeek model repository</td>
+<td><code>314113f8a7dadb388215396ba5fbee2c610a04d6</code></td>
+</tr>
+</tbody>
+</table>
+<p>The article’s source links are pinned to those revisions. The vLLM comparison is targeted; it is not an audit of every backend or its entire scheduler. No independent GPU timing or numerical-equivalence result is claimed here.</p>
+<p>The <a href="./assets/baseten_2000tps/analysis.py">calculation and figure script</a> reproduces the analytical examples and their plots with Python, NumPy and Matplotlib. All byte counts use decimal GB/TB unless stated otherwise. Logical traffic, allocated packed storage and measured hardware transfers are kept separate.</p>
+
+
+</section>
+
+</main> <!-- /main -->
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+        const codeEl = trigger.previousElementSibling.cloneNode(true);
+        for (const childEl of codeEl.children) {
+          if (isCodeAnnotation(childEl)) {
+            childEl.remove();
+          }
+        }
+        return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp("https:\/\/heyyanshuman\.com");
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script>
+</div> <!-- /content -->
+
+
+
+
+</body></html>
