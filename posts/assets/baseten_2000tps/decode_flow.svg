@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 675" role="img" aria-labelledby="title desc">
+<title id="title">Request setup and speculative decode loop</title>
+<desc id="desc">A request restores a reusable prefix if available, runs prefill and initializes speculation. Each captured GPU step drafts and checks tokens, then the host reads snapshots, streams output and checks whether to stop.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#657585"/></marker></defs>
+<style>text {font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;fill:#1f2933} .label{font-size:13px;font-weight:650;letter-spacing:1.1px;fill:#526779} .small{font-size:12px;fill:#526779} .node{fill:#fff;stroke:#b9c9d7;stroke-width:1.4} .gpu-node{fill:#fff;stroke:#8aafbd;stroke-width:1.4} .node-text{font-size:14px;font-weight:550;text-anchor:middle;dominant-baseline:middle} .arrow{fill:none;stroke:#657585;stroke-width:1.6;marker-end:url(#arrow);stroke-linecap:round;stroke-linejoin:round} .panel{fill:#f7f9fb;stroke:#dce4ea;stroke-width:1} .gpu-panel{fill:#edf6f7;stroke:#bfd6d9;stroke-width:1}</style>
+
+<rect class="panel" x="8" y="8" width="744" height="221" rx="14"/><text class="label" x="26" y="33">01  REQUEST SETUP</text>
+<rect class="node" x="26" y="48" width="210" height="54" rx="8"/>
+<text class="node-text" x="131" y="67">Check and validate</text>
+<text class="node-text" x="131" y="84">cached prefix</text>
+<rect class="node" x="275" y="48" width="210" height="54" rx="8"/>
+<text class="node-text" x="380" y="67">Restore prefix</text>
+<text class="node-text" x="380" y="84">if reusable</text>
+<rect class="node" x="524" y="48" width="210" height="54" rx="8"/>
+<text class="node-text" x="629" y="67">Stage inputs and</text>
+<text class="node-text" x="629" y="84">set sampling seed</text>
+<path class="arrow" d="M236 75 H275"/>
+<path class="arrow" d="M485 75 H524"/>
+<rect class="node" x="524" y="125" width="210" height="54" rx="8"/>
+<text class="node-text" x="629" y="144">Prefill remaining</text>
+<text class="node-text" x="629" y="161">prompt</text>
+<rect class="node" x="275" y="125" width="210" height="54" rx="8"/>
+<text class="node-text" x="380" y="144">Sample and stream</text>
+<text class="node-text" x="380" y="161">first token</text>
+<rect class="node" x="26" y="125" width="210" height="54" rx="8"/>
+<text class="node-text" x="131" y="144">Initialize</text>
+<text class="node-text" x="131" y="161">speculative state</text>
+<path class="arrow" d="M629 102 V125"/>
+<path class="arrow" d="M524 152 H485"/>
+<path class="arrow" d="M275 152 H236"/>
+<rect class="gpu-panel" x="8" y="249" width="744" height="221" rx="14"/><text class="label" x="26" y="274">02  CAPTURED GPU GRAPH  ·  ONE DECODE STEP</text>
+<rect class="gpu-node" x="26" y="289" width="210" height="54" rx="8"/>
+<text class="node-text" x="131" y="308">Run DSpark</text>
+<text class="node-text" x="131" y="325">draft layers</text>
+<rect class="gpu-node" x="275" y="289" width="210" height="54" rx="8"/>
+<text class="node-text" x="380" y="308">Apply Markov correction</text>
+<text class="node-text" x="380" y="325">and sample drafts</text>
+<rect class="gpu-node" x="524" y="289" width="210" height="54" rx="8"/>
+<text class="node-text" x="629" y="308">Choose verification</text>
+<text class="node-text" x="629" y="325">length from confidence</text>
+<path class="arrow" d="M236 316 H275"/>
+<path class="arrow" d="M485 316 H524"/>
+<rect class="gpu-node" x="524" y="366" width="210" height="54" rx="8"/>
+<text class="node-text" x="629" y="385">Run target verification</text>
+<text class="node-text" x="629" y="402">and prepare draft context</text>
+<rect class="gpu-node" x="275" y="366" width="210" height="54" rx="8"/>
+<text class="node-text" x="380" y="385">Sample acceptance</text>
+<text class="node-text" x="380" y="402">or replacement</text>
+<rect class="gpu-node" x="26" y="366" width="210" height="54" rx="8"/>
+<text class="node-text" x="131" y="385">Commit output and</text>
+<text class="node-text" x="131" y="402">update state</text>
+<path class="arrow" d="M629 343 V366"/>
+<path class="arrow" d="M524 393 H485"/>
+<path class="arrow" d="M275 393 H236"/>
+<path class="arrow" d="M26 152 H16 V316 H26"/>
+<rect class="panel" x="8" y="490" width="744" height="125" rx="14"/><text class="label" x="26" y="515">03  SERVER LOOP</text>
+<rect class="node" x="26" y="531" width="210" height="54" rx="8"/>
+<text class="node-text" x="131" y="550">Write completion</text>
+<text class="node-text" x="131" y="567">snapshot</text>
+<rect class="node" x="275" y="531" width="210" height="54" rx="8"/>
+<text class="node-text" x="380" y="550">Read earlier snapshot</text>
+<text class="node-text" x="380" y="567">and stream new tokens</text>
+<rect class="node" x="524" y="531" width="210" height="54" rx="8"/>
+<text class="node-text" x="629" y="550">Check stop, length</text>
+<text class="node-text" x="629" y="567">and cancellation</text>
+<path class="arrow" d="M26 393 H16 V558 H26"/>
+<path class="arrow" d="M236 558 H275"/>
+<path class="arrow" d="M485 558 H524"/>
+<text class="small" x="26" y="651">Logical flow; graph launches and host snapshot reads can overlap.</text></svg>

@@ -1,0 +1,10 @@
+{
+  "study_date": "2026-11-15",
+  "baseten_commit": "76766a97308bfd1658fb055e835d0f92de737dc3",
+  "sglang_commit": "a56dbcf181cfb7f395c340a093ec5a0bca22cae5",
+  "model_revision": "314113f8a7dadb388215396ba5fbee2c610a04d6",
+  "model_config_url": "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/raw/314113f8a7dadb388215396ba5fbee2c610a04d6/inference/config.json",
+  "model_config_sha256": "2e84f45cf1dac8c7fcbb200e96667d4b913275690668ed496f24c7747207a809",
+  "vllm_commit": "9bc16ae6a34b1e0fe260e8d12b98568478bf38c3",
+  "environment": "macOS arm64; source analysis only; no Blackwell performance measurements"
+}

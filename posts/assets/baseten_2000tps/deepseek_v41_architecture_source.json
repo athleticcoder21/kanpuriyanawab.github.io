@@ -1,0 +1,14 @@
+{
+  "source": "https://arxiv.org/pdf/2609.19969",
+  "authors": "DeepSeek-AI",
+  "figure": 3,
+  "pdf_page": 7,
+  "crop_points": [
+    65,
+    78,
+    530,
+    320
+  ],
+  "pdf_sha256": "0cfdda19c8e1691b5226dd0d4949e2397051268e8a823c2fb61db94ea20c4ac0",
+  "note": "Figure artwork reproduced without changes; page text and original caption excluded from crop."
+}

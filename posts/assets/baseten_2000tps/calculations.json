@@ -1,0 +1,60 @@
+{
+  "kind": "analytical calculations, not GPU measurements",
+  "reported_rate_implied_commit_length": {
+    "TP4": 5.742,
+    "TP8": 5.5826
+  },
+  "headline_equivalent_ms_per_token": 0.4854368932038835,
+  "reported_rate_ratio_TP8_TP4": 1.1839080459770115,
+  "expert_weights": 35389440,
+  "all_routed_weights": 543581798400,
+  "active_routed_weights_per_target_row": 8493465600,
+  "logical_fp4_bytes_per_weight": 0.53125,
+  "active_logical_routed_weight_bytes": 4512153600.0,
+  "logical_expert_bytes": 18800640.0,
+  "packing": {
+    "4": {
+      "inter": 576,
+      "w13_pad": 640,
+      "w2_payload_channels": 576,
+      "per_rank_bytes": 5058560,
+      "all_rank_bytes": 20234240,
+      "storage_overhead_fraction": 0.07625272331154687
+    },
+    "8": {
+      "inter": 288,
+      "w13_pad": 384,
+      "w2_payload_channels": 320,
+      "per_rank_bytes": 2969600,
+      "all_rank_bytes": 23756800,
+      "storage_overhead_fraction": 0.2636165577342049
+    }
+  },
+  "seven_row_toy_expert_union": 40.081725915981224,
+  "weight_only_intensity": {
+    "one_or_disjoint": 3.764705882352941,
+    "seven_identical": 26.352941176470587,
+    "ratio_of_expected_work_to_expected_bytes_uniform": 3.944881200731416
+  },
+  "ideal_component_HBM_ms": {
+    "single_row_TP4_GB300": 0.14100479999999999,
+    "single_row_TP8_B300": 0.07324924675324676,
+    "seven_rows_uniform_TP8_B300": 0.489326038652619
+  },
+  "fused_wqkv": {
+    "m": 7,
+    "k": 5120,
+    "n": 1792,
+    "weight_elements": 9175040,
+    "useful_FLOPs": 128450560,
+    "ideal_FP8_payload_HBM_us": 1.1915636363636364,
+    "ideal_dense_FP8_math_us": 0.02854456888888889
+  },
+  "eliminated_BF16_write_read_bytes_7x5120": 143360,
+  "FP8_B300_hardware_balance_FLOPs_per_byte": 584.4155844155844,
+  "prefill_layer_rows_N_1M": {
+    "conventional": 40000000,
+    "bounded": 20002560,
+    "ratio": 0.500064
+  }
+}
