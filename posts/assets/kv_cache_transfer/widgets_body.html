@@ -81,6 +81,33 @@
     });
   });
 
+  // Switch between the ridge recipe's algorithm and code panels.
+  ["ridge", "distill"].forEach(prefix => {
+    const recipe = document.getElementById(prefix + "-recipe");
+    if (!recipe) return;
+    const buttons = [...recipe.querySelectorAll('[role="tab"]')];
+    function selectTab(active) {
+      const diagram = document.getElementById(prefix + "-diagram");
+      if (diagram) diagram.hidden = active.id === prefix + "-code-tab";
+      buttons.forEach(button => {
+        const selected = button === active;
+        button.classList.toggle("on", selected);
+        button.setAttribute("aria-selected", String(selected));
+        button.tabIndex = selected ? 0 : -1;
+        document.getElementById(button.getAttribute("aria-controls")).hidden = !selected;
+      });
+    }
+    buttons.forEach((button, i) => {
+      button.addEventListener("click", () => selectTab(button));
+      button.addEventListener("keydown", event => {
+        if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+        event.preventDefault();
+        const next = buttons[(i + (event.key === "ArrowRight" ? 1 : -1) + buttons.length) % buttons.length];
+        selectTab(next); next.focus();
+      });
+    });
+  });
+
   /* ------------------------------------------------------------------ method diagram */
   (function method() {
     const root = document.getElementById("kt-method");
@@ -89,8 +116,7 @@
     const s = sv("svg", { viewBox: `0 0 ${W} ${H}`, class: "kt-svg", role: "img",
       "aria-label": "Small model prefills the prompt, a per-layer mapper turns its states into the big model's KV cache, the big model decodes." });
     const body = root.querySelector(".kt-body");
-    let mode = 1;
-    const sel = tabs(root.querySelector(".kt-tabs-slot"), ["Normal prefill", "Cache transfer"], i => { mode = i; draw(); });
+    let mode = 0;
     body.append(s);
     function box(x, y, w, h, fill, stroke) { return sv("rect", { x, y, width: w, height: h, rx: 8, fill, stroke, "stroke-width": 1.2 }); }
     function arrow(x1, y1, x2, y2, col, dash) {
@@ -136,16 +162,16 @@
         s.append(sv("text", { x: mx + 12, y: my + 22, class: "kt-t-strong" }, "Mapper (the only thing trained)"));
         s.append(sv("text", { x: mx + 12, y: my + 42 }, "for each big layer t:"));
         s.append(sv("text", { x: mx + 12, y: my + 60, class: "kt-t-ink", "font-family": "monospace" }, "Y_t = X_S(t) · (W₀ + A·B)"));
-        s.append(sv("text", { x: mx + 12, y: my + 80 }, "S(t): top-3 source layers"));
+        s.append(sv("text", { x: mx + 12, y: my + 80 }, "X_S(t): states from 3 best-fit layers"));
         s.append(sv("text", { x: mx + 12, y: my + 98 }, "W₀: ridge fit, A·B: rank 64, KL"));
         s.append(sv("text", { x: mx + 12, y: my + 116 }, "then re-apply big-model RoPE"));
         s.append(arrow(sx + sw + 4, sy + 75, mx - 6, my + 60, C.ink2));
         s.append(arrow(mx + mw + 4, my + 60, bx - 6, 150, C.xfer));
-        s.append(sv("text", { x: 290, y: 100, class: "kt-t-ink" }, "the big model never sees the prompt tokens;"));
-        s.append(sv("text", { x: 290, y: 116 }, "it decodes from a cache it did not build"));
+        s.append(sv("text", { x: 290, y: 100, class: "kt-t-ink" }, "the small model reads the prompt;"));
+        s.append(sv("text", { x: 290, y: 116 }, "the big model decodes from its mapped cache"));
       }
     }
-    sel(1);
+    draw();
   })();
 
   /* ------------------------------------------------------------------ experiment 0: reproduction */
