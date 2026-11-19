@@ -1,0 +1,654 @@
+<script>
+/* Interactive figures for posts/kv_cache_transfer.qmd. Plain JS + inline SVG, no dependencies.
+   Every number below is copied from the experiment result files (results/<pair>/*.json in the kv_transfer repo). */
+(function () {
+  "use strict";
+  const NS = "http://www.w3.org/2000/svg";
+  const C = { big: "#2a78d6", xfer: "#eb6834", small: "#1baf7a", ink: "#1b1b1a", ink2: "#52514e",
+              muted: "#8a8984", grid: "#eeede9", rule: "#e4e2dc", none: "#e9e7e2", surface: "#fcfcfb" };
+
+  function el(tag, attrs, ...kids) {
+    const e = document.createElement(tag);
+    for (const k in attrs || {}) {
+      if (k === "class") e.className = attrs[k];
+      else if (k === "html") e.innerHTML = attrs[k];
+      else if (k === "style") e.style.cssText = attrs[k];
+      else if (k.startsWith("on")) e.addEventListener(k.slice(2), attrs[k]);
+      else e.setAttribute(k, attrs[k]);
+    }
+    kids.flat().forEach(c => { if (c != null) e.append(c.nodeType ? c : document.createTextNode(c)); });
+    return e;
+  }
+  function sv(tag, attrs, ...kids) {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs || {}) {
+      if (k.startsWith("on")) e.addEventListener(k.slice(2), attrs[k]);
+      else e.setAttribute(k, attrs[k]);
+    }
+    kids.flat().forEach(c => { if (c != null) e.append(c.nodeType ? c : document.createTextNode(c)); });
+    return e;
+  }
+  const tip = el("div", { class: "kt-tip", role: "tooltip" });
+  document.body.append(tip);
+  function showTip(ev, html) {
+    tip.innerHTML = html; tip.style.display = "block";
+    const w = tip.offsetWidth, h = tip.offsetHeight;
+    let x = ev.clientX + 14, y = ev.clientY + 14;
+    if (x + w > innerWidth - 8) x = ev.clientX - w - 14;
+    if (y + h > innerHeight - 8) y = ev.clientY - h - 12;
+    tip.style.left = Math.max(8, x) + "px"; tip.style.top = Math.max(8, y) + "px";
+  }
+  function hideTip() { tip.style.display = "none"; }
+  function hover(node, html) {
+    node.addEventListener("mousemove", ev => showTip(ev, typeof html === "function" ? html() : html));
+    node.addEventListener("mouseleave", hideTip);
+  }
+  function tabs(slot, names, onSel) {
+    const bar = el("div", { class: "kt-tabs", role: "tablist" });
+    const btns = names.map((n, i) => el("button", { class: "kt-tab", role: "tab", type: "button", onclick: () => sel(i) }, n));
+    bar.append(...btns); slot.append(bar);
+    function sel(i) { btns.forEach((b, j) => { b.classList.toggle("on", i === j); b.setAttribute("aria-selected", i === j); }); onSel(i); }
+    return sel;
+  }
+  const pct = (x, ref) => Math.round(100 * x / ref);
+  const f3 = x => x.toFixed(3);
+  function legend(items) {
+    return el("div", { class: "kt-legend" }, items.map(([c, t, shape]) =>
+      el("span", {}, el("i", { class: "kt-sw", style: `background:${c};${shape === "round" ? "border-radius:50%" : ""}` }), t)));
+  }
+  function table(head, rows, opts) {
+    opts = opts || {};
+    const t = el("table", { class: "kt-table" });
+    t.append(el("thead", {}, el("tr", {}, head.map((h, i) => el("th", { class: i && opts.num !== false ? "num" : "" }, h)))));
+    const tb = el("tbody");
+    rows.forEach(r => {
+      const tr = el("tr", { class: r.hl ? "hl" : "" });
+      (r.cells || r).forEach((c, i) => tr.append(el("td", { class: i && opts.num !== false ? "num" : "", html: String(c) })));
+      tb.append(tr);
+    });
+    t.append(tb);
+    return el("div", { class: "kt-scroll" }, t);
+  }
+
+  // Setup toggles on every figure
+  document.querySelectorAll(".kt-fig").forEach(fig => {
+    const btn = fig.querySelector(".kt-setup-btn"), panel = fig.querySelector(".kt-setup");
+    if (!btn || !panel) return;
+    btn.setAttribute("aria-expanded", "false");
+    btn.addEventListener("click", () => {
+      const open = panel.classList.toggle("open");
+      btn.setAttribute("aria-expanded", open);
+    });
+  });
+
+  /* ------------------------------------------------------------------ method diagram */
+  (function method() {
+    const root = document.getElementById("kt-method");
+    if (!root) return;
+    const W = 860, H = 300;
+    const s = sv("svg", { viewBox: `0 0 ${W} ${H}`, class: "kt-svg", role: "img",
+      "aria-label": "Small model prefills the prompt, a per-layer mapper turns its states into the big model's KV cache, the big model decodes." });
+    const body = root.querySelector(".kt-body");
+    let mode = 1;
+    const sel = tabs(root.querySelector(".kt-tabs-slot"), ["Normal prefill", "Cache transfer"], i => { mode = i; draw(); });
+    body.append(s);
+    function box(x, y, w, h, fill, stroke) { return sv("rect", { x, y, width: w, height: h, rx: 8, fill, stroke, "stroke-width": 1.2 }); }
+    function arrow(x1, y1, x2, y2, col, dash) {
+      return sv("g", {}, sv("line", { x1, y1, x2, y2, stroke: col, "stroke-width": 1.8, "stroke-dasharray": dash || "" }),
+        sv("path", { d: `M${x2} ${y2} l-7 -4 v8 z`, fill: col, transform: `rotate(${Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI} ${x2} ${y2})` }));
+    }
+    function draw() {
+      s.innerHTML = "";
+      // prompt tokens
+      s.append(sv("text", { x: 20, y: 28, class: "kt-t-strong" }, "Prompt (thousands of tokens)"));
+      for (let i = 0; i < 14; i++) s.append(sv("rect", { x: 20 + i * 15, y: 40, width: 12, height: 18, rx: 3, fill: C.none }));
+      s.append(sv("text", { x: 20, y: 76 }, "documents, few-shot examples, a long codebase…"));
+      // big model column (right)
+      const bx = 560, by = 30, bw = 280, bh = 230;
+      s.append(box(bx, by, bw, bh, "#fff", C.rule));
+      s.append(sv("text", { x: bx + 14, y: by + 22, class: "kt-t-strong" }, "Big model (frozen)"));
+      s.append(sv("text", { x: bx + 14, y: by + 40 }, "KV cache, one slab per layer"));
+      const L = 8;
+      for (let l = 0; l < L; l++) {
+        const y = by + 56 + (L - 1 - l) * 18;
+        s.append(sv("rect", { x: bx + 14, y, width: 150, height: 13, rx: 3, fill: mode ? C.xfer : C.big }));
+        s.append(sv("text", { x: bx + 172, y: y + 11, "font-size": 11 }, l === 0 ? "layer 0" : l === L - 1 ? "layer L−1" : ""));
+      }
+      s.append(sv("text", { x: bx + 14, y: by + bh - 14, class: "kt-t-ink" }, "→ decodes the answer token by token"));
+      if (!mode) {
+        s.append(arrow(240, 49, bx - 6, 49, C.big));  // straight across, well above the label below it
+        s.append(sv("text", { x: 290, y: 118, class: "kt-t-ink" }, "big model reads every prompt token"));
+        s.append(sv("text", { x: 290, y: 134 }, "through every layer: the slow part"));
+        s.append(sv("text", { x: 20, y: 200, class: "kt-t-strong" }, "Prefill cost ≈ big model × prompt length"));
+        s.append(sv("text", { x: 20, y: 220 }, "at 128k tokens Qwen3.8-27B needs 19.9 s on one GPU (HF)"));
+      } else {
+        // small model
+        const sx = 20, sy = 110, sw = 210, sh = 150;
+        s.append(box(sx, sy, sw, sh, "#fff", C.rule));
+        s.append(sv("text", { x: sx + 12, y: sy + 22, class: "kt-t-strong" }, "Small model (frozen)"));
+        s.append(sv("text", { x: sx + 12, y: sy + 40 }, "reads the prompt, keeps its"));
+        s.append(sv("text", { x: sx + 12, y: sy + 56 }, "per-layer K, V (or hidden states)"));
+        for (let l = 0; l < 5; l++) s.append(sv("rect", { x: sx + 12, y: sy + 70 + (4 - l) * 14, width: 110, height: 10, rx: 3, fill: C.small }));
+        s.append(arrow(70, 84, 70, sy - 4, C.ink2));
+        // mapper
+        const mx = 290, my = 130, mw = 210, mh = 130;
+        s.append(box(mx, my, mw, mh, "#fff8f4", C.xfer));
+        s.append(sv("text", { x: mx + 12, y: my + 22, class: "kt-t-strong" }, "Mapper (the only thing trained)"));
+        s.append(sv("text", { x: mx + 12, y: my + 42 }, "for each big layer t:"));
+        s.append(sv("text", { x: mx + 12, y: my + 60, class: "kt-t-ink", "font-family": "monospace" }, "Y_t = X_S(t) · (W₀ + A·B)"));
+        s.append(sv("text", { x: mx + 12, y: my + 80 }, "S(t): top-3 source layers"));
+        s.append(sv("text", { x: mx + 12, y: my + 98 }, "W₀: ridge fit, A·B: rank 64, KL"));
+        s.append(sv("text", { x: mx + 12, y: my + 116 }, "then re-apply big-model RoPE"));
+        s.append(arrow(sx + sw + 4, sy + 75, mx - 6, my + 60, C.ink2));
+        s.append(arrow(mx + mw + 4, my + 60, bx - 6, 150, C.xfer));
+        s.append(sv("text", { x: 290, y: 100, class: "kt-t-ink" }, "the big model never sees the prompt tokens;"));
+        s.append(sv("text", { x: 290, y: 116 }, "it decodes from a cache it did not build"));
+      }
+    }
+    sel(1);
+  })();
+
+  /* ------------------------------------------------------------------ experiment 0: reproduction */
+  (function repro() {
+    const root = document.getElementById("kt-repro");
+    if (!root) return;
+    const body = root.querySelector(".kt-body");
+    const views = [
+      () => [legend([[C.big, "Qwen3-8B's own cache"], [C.xfer, "0.6B → mapped cache"], [C.muted, "no cache"]]),
+        bars([["8B's own cache", 0.001, C.big, "top-1 0.987 · PPL 9.59"], ["no prefix at all", 0.725, C.muted, "top-1 0.686 · PPL 17.75"],
+              ["ridge map only", 0.422, C.xfer, "top-1 0.733 · PPL 13.31"], ["ridge + rank-16 KL", 0.135, C.xfer, "top-1 0.842 · PPL 10.31"],
+              ["ridge + rank-64 KL", 0.128, C.xfer, "best of the round-2 sweep"]], 0.8, "KL to teacher (lower is better)"),
+        el("div", { class: "kt-note" }, "KL(teacher ‖ student) on a 128-token continuation after a 2,048-token prefix, 128 held-out fineweb-edu docs.")],
+      () => [table(["prefilled by", "SQuAD F1 (300)", "HotpotQA F1 (300)", "GSM8K acc (400)"], [
+        ["Qwen3-8B itself", "0.738", "0.603", "0.925"],
+        { hl: 1, cells: ["0.6B → r64 mapper", "0.721 (98%)", "0.461 (76%)", "0.665 (72%)"] },
+        ["0.6B → r64 + task post-training", "0.684 (93%)", "0.523 (87%)", "0.797 (86%)"],
+        ["Qwen3-0.6B alone", "0.388", "0.029", "0.495"],
+        ["8B, no context (closed book)", "0.248", "0.207", "–"]]),
+        el("div", { class: "kt-note" }, "Post-training only helps the tasks it sees: holding GSM8K out of the task mix leaves GSM8K at 0.650.")],
+      () => [table(["small model", "fidelity KL", "SQuAD transfer / alone", "HotpotQA transfer / alone", "GSM8K transfer / alone", "prefill speedup 8k / 32k"], [
+        ["Qwen3-0.6B", "0.128", "0.721 / 0.388", "0.461 / 0.029", "0.665 / 0.495", "4.6× / 3.5×"],
+        ["Qwen3-1.7B", "0.098", "0.746 / 0.639", "0.515 / 0.149", "0.757 / <b>0.815</b>", "3.2× / 2.7×"],
+        ["Qwen3-4B", "0.054", "0.774 / 0.738", "0.595 / 0.542", "0.877 / <b>0.915</b>", "1.4× / 1.2×"]]),
+        el("div", { class: "kt-note" }, "Big model is Qwen3-8B (0.738 / 0.603 / 0.925) in every row. Bold: the small model alone beats the transfer.")],
+      () => [legend([[C.big, "exact half"], [C.xfer, "mapped half"]]),
+        bars([["both mapped", 0.135, C.xfer, "rank-16 mapper"], ["exact K, mapped V", 0.134, C.xfer, "fixing keys changes nothing"],
+              ["mapped K, exact V", 0.094, C.big, "fixing values closes ~30% of the gap"]], 0.2, "KL to teacher (lower is better)"),
+        el("div", { class: "kt-note" }, "For this pair the values are the bottleneck. OneTriangle report the opposite (keys matter more) on their pairs.")],
+      () => [table(["", "round 3 (first machine)", "round 4 (rerun)"], [
+        ["ridge fidelity KL", "0.422", "0.442"],
+        ["r64 fidelity KL, same command", "0.128", "0.129"],
+        ["r64 SQuAD / HotpotQA / GSM8K", "0.721 / 0.461 / 0.665", "0.704 / 0.467 / 0.623"],
+        ["8B exact SQuAD / HotpotQA / GSM8K", "0.738 / 0.603 / 0.925", "0.743 / 0.610 / 0.927"]]),
+        el("div", { class: "kt-note" }, "Fidelity reproduces exactly; task scores move ±0.02–0.04 between independent training runs (GSM8K SE ≈ 0.024).")],
+    ];
+    function bars(rows, max, axis) {
+      const g = el("div", { class: "kt-bars", style: "grid-template-columns:150px 1fr 260px" });
+      rows.forEach(([lab, v, col, note]) => {
+        const tr = el("div", { class: "kt-track" }, el("div", { class: "kt-fill", style: `width:${100 * v / max}%;background:${col}` }));
+        g.append(el("div", { class: "lab" }, lab), tr, el("div", { class: "val" }, `${f3(v)} · ${note}`));
+      });
+      return el("div", {}, el("div", { class: "kt-sub" }, axis), g);
+    }
+    tabs(root.querySelector(".kt-tabs-slot"), ["Fidelity", "Tasks", "Small-model size", "Keys vs values", "Rerun"], i => {
+      body.innerHTML = ""; body.append(...views[i]());
+    })(0);
+  })();
+
+  /* ------------------------------------------------------------------ layer plans (shared) */
+  function plan(spec, L) {
+    const [base, flag] = spec.split("/"); const [name, arg] = base.split(":");
+    const R = (a, b) => Array.from({ length: b - a }, (_, i) => a + i);
+    const k = +arg;
+    const T = { all: () => R(0, L), first: () => R(0, k), last: () => R(L - k, L),
+      every: () => R(0, L).filter(l => l % k === k - 1), keep: () => R(0, L).filter(l => l % k !== k - 1),
+      range: () => { const [a, b] = arg.split("-").map(Number); return R(a, b); } }[name]();
+    const S = new Set(T), blocks = [];
+    let l = 0;
+    while (l < L) { if (S.has(l)) { const a = l; while (l < L && S.has(l)) l++; if (l < L) blocks.push([a, l]); } else l++; }
+    return { S, blocks, delta: flag !== "nodelta", n: T.length };
+  }
+  function strip(svg, spec, L, opts) {
+    opts = opts || {};
+    const W = 860, x0 = 92, x1 = W - 20, cw = (x1 - x0) / L, y = opts.y || 24, h = 30;
+    const p = plan(spec, L);
+    svg.append(sv("text", { x: 0, y: y + 19, class: "kt-t-ink", "font-size": 12 }, opts.label || "layers"));
+    for (let l = 0; l < L; l++) {
+      const isT = p.S.has(l), att = opts.attn && opts.attn(l);
+      const r = sv("rect", { x: x0 + l * cw + 1, y, width: cw - 2, height: h, rx: Math.min(3, cw / 4), fill: isT ? C.xfer : C.big });
+      svg.append(r);
+      if (att) svg.append(sv("path", { d: `M${x0 + l * cw + cw / 2 - 4} ${y - 4} h8 l-4 -6 z`, fill: C.ink }));
+      const hit = sv("rect", { x: x0 + l * cw, y: y - 10, width: cw, height: h + 14, fill: "transparent" });
+      hover(hit, () => opts.tipFor ? opts.tipFor(l, isT, att) :
+        `<b>layer ${l}</b><br>${isT ? "transferred: K, V mapped from the small model" : "native: the big model computes this layer over the prompt"}`);
+      svg.append(hit);
+    }
+    // residual Δ bridges
+    p.blocks.forEach(([a, b]) => {
+      const xa = x0 + a * cw + 2, xb = x0 + b * cw + cw / 2, yb = y + h + 6;
+      svg.append(sv("path", { d: `M${xa} ${yb} v6 H${xb} v-6`, fill: "none", stroke: p.delta ? C.ink : C.muted,
+        "stroke-width": 1.4, "stroke-dasharray": p.delta ? "" : "3 3" }));
+      if (b - a >= 2 || p.blocks.length < 6)
+        svg.append(sv("text", { x: (xa + xb) / 2, y: yb + 20, "text-anchor": "middle", "font-size": 11, fill: p.delta ? C.ink : C.muted }, p.delta ? "Δ" : "no Δ"));
+    });
+    svg.append(sv("text", { x: x0, y: y + h + 50, "font-size": 11 }, "layer 0 (bottom)"));
+    svg.append(sv("text", { x: x1, y: y + h + 50, "font-size": 11, "text-anchor": "end" }, `layer ${L - 1} (top)`));
+    return p;
+  }
+
+  /* ------------------------------------------------------------------ experiment 1: partial-layer transfer */
+  (function plans() {
+    const root = document.getElementById("kt-plans");
+    if (!root) return;
+    const EX = { squad: 0.743, hotpot: 0.610, gsm: 0.927 }, ALONE = { squad: 0.381, hotpot: 0.029, gsm: 0.482 };
+    // spec, KL ridge, KL r64, SQuAD, HotpotQA, GSM8K, speedup 8k, speedup 32k
+    const D = [
+      ["all", .442, .136, .690, .454, .640, 3.76, 3.58], ["last:33", .425, .134, .643, .415, .623, 2.91, 2.76],
+      ["last:30", .397, .130, .668, .447, .637, 2.36, 2.26], ["last:27", .371, .125, .667, .453, .660, 2.01, 1.97],
+      ["last:24", .328, .113, .684, .492, .635, 1.75, 1.67], ["last:21", .281, .102, .676, .460, .708, 1.55, 1.48],
+      ["last:18", .231, .079, .675, .506, .812, 1.35, 1.34], ["last:15", .178, .055, .693, .510, .870, 1.23, 1.20],
+      ["last:12", .120, .037, .696, .542, .900, 1.14, 1.09], ["last:9", .074, .021, .729, .578, .912, 1.04, 1.02],
+      ["last:6", .048, .014, .742, .603, .922, 0.97, 0.94], ["first:27", .383, .133, .706, .446, .635, 2.11, 2.11],
+      ["first:18", .422, .135, .610, .430, .117, 1.44, 1.44], ["keep:4", .442, .144, .688, .432, .650, 1.93, 1.91],
+      ["keep:2", .501, .138, .671, .419, .545, 1.29, 1.30], ["every:2", .348, .107, .654, .496, .805, 1.31, 1.31],
+      ["range:9-27", .293, .116, .697, .457, .682, 1.39, 1.41], ["keep:4/nodelta", .973, .233, .398, .357, .490, 2.05, 2.03],
+      ["every:2/nodelta", .675, .212, .412, .329, .430, 1.34, 1.35]].map(r => ({ spec: r[0], klr: r[1], kl: r[2], squad: r[3], hotpot: r[4], gsm: r[5], s8: r[6], s32: r[7] }));
+    const by = Object.fromEntries(D.map(d => [d.spec, d]));
+    const groups = [["top N", ["all", "last:33", "last:30", "last:27", "last:24", "last:21", "last:18", "last:15", "last:12", "last:9", "last:6"]],
+                    ["bottom N", ["first:27", "first:18"]], ["interleaved", ["every:2", "keep:2", "keep:4", "range:9-27"]],
+                    ["no Δ", ["every:2/nodelta", "keep:4/nodelta"]]];
+    const body = root.querySelector(".kt-body");
+    let cur = "last:18", metric = "gsm";
+    const chips = el("div", { class: "kt-chips" });
+    const chipBtns = {};
+    groups.forEach(([g, specs]) => {
+      const cg = el("div", { class: "kt-chipgroup" }, el("i", {}, g));
+      specs.forEach(s => { const b = el("button", { class: "kt-chip", type: "button", onclick: () => select(s) }, s); chipBtns[s] = b; cg.append(b); });
+      chips.append(cg);
+    });
+    const stripSvg = sv("svg", { viewBox: "0 0 860 122", class: "kt-svg" });
+    const stats = el("div", { class: "kt-stats" });
+    const barsBox = el("div", { class: "kt-bars" });
+    const scatterHead = el("div", { class: "kt-row", style: "justify-content:space-between;align-items:flex-end;margin-top:18px" });
+    const scatterTabsSlot = el("div");
+    scatterHead.append(el("div", { class: "kt-sub", style: "margin:0" }, "Every trained plan: prefill speedup vs quality"), scatterTabsSlot);
+    const sc = sv("svg", { viewBox: "0 0 860 330", class: "kt-svg" });
+    body.append(chips, legend([[C.big, "native: Qwen3-8B computes the layer over the prompt"], [C.xfer, "transferred: K, V mapped from Qwen3-0.6B"]]),
+      stripSvg, stats, barsBox, scatterHead, sc);
+
+    function select(s) {
+      cur = s;
+      Object.entries(chipBtns).forEach(([k, b]) => b.classList.toggle("on", k === s));
+      const d = by[s];
+      stripSvg.innerHTML = "";
+      const p = strip(stripSvg, s, 36, { label: "Qwen3-8B" });
+      stats.innerHTML = "";
+      [["prefill speedup", `${d.s8.toFixed(2)}×`, `at 8k tokens · ${d.s32.toFixed(2)}× at 32k`],
+       ["layers the 8B still runs", `${36 - p.n} / 36`, `${p.n} transferred${p.delta ? "" : ", residual skipped"}`],
+       ["fidelity KL", f3(d.kl), `ridge init ${f3(d.klr)} → trained`]].forEach(([k, v, s2]) =>
+        stats.append(el("div", { class: "kt-stat" }, el("div", { class: "k" }, k), el("div", { class: "v" }, v), el("div", { class: "s" }, s2))));
+      barsBox.innerHTML = "";
+      [["SQuAD", "squad"], ["HotpotQA", "hotpot"], ["GSM8K", "gsm"]].forEach(([lab, key]) => {
+        const v = d[key], p100 = 100 * v / EX[key];
+        const tr = el("div", { class: "kt-track" },
+          el("div", { class: "kt-fill", style: `width:${Math.min(100, p100) / 1.05}%;background:${C.xfer}` }),
+          el("div", { class: "kt-ref", style: `left:${100 / 1.05}%`, title: "Qwen3-8B itself" }));
+        hover(tr, `<b>${lab}</b>: ${f3(v)} with plan <b>${s}</b><br>Qwen3-8B itself: ${f3(EX[key])} (tick)<br>Qwen3-0.6B alone: ${f3(ALONE[key])}`);
+        barsBox.append(el("div", { class: "lab" }, lab), tr, el("div", { class: "val" }, `${f3(v)} · ${Math.round(p100)}% of 8B`));
+      });
+      drawScatter();
+    }
+
+    function drawScatter() {
+      sc.innerHTML = "";
+      const W = 860, H = 330, m = { l: 50, r: 20, t: 30, b: 40 };
+      const lo = Math.log(0.9), hi = Math.log(4.1);
+      const X = v => m.l + (Math.log(v) - lo) / (hi - lo) * (W - m.l - m.r), Y = v => H - m.b - v / 105 * (H - m.t - m.b);
+      [0, 25, 50, 75, 100].forEach(v => {
+        sc.append(sv("line", { x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v), stroke: C.grid }));
+        sc.append(sv("text", { x: m.l - 8, y: Y(v) + 4, "text-anchor": "end", "font-size": 11 }, v + "%"));
+      });
+      [1, 1.25, 1.5, 2, 2.5, 3, 4].forEach(v => sc.append(sv("text", { x: X(v), y: H - m.b + 18, "text-anchor": "middle", "font-size": 11 }, v + "×")));
+      sc.append(sv("line", { x1: m.l, x2: W - m.r, y1: H - m.b, y2: H - m.b, stroke: C.rule }));
+      sc.append(sv("text", { x: W - m.r, y: H - 4, "text-anchor": "end", "font-size": 11 }, "prefill speedup at 8k tokens (log scale) →"));
+      sc.append(sv("text", { x: 0, y: 12, "font-size": 11 }, `${{ gsm: "GSM8K", hotpot: "HotpotQA", squad: "SQuAD" }[metric]}, % of Qwen3-8B`));
+      // small-alone reference
+      const ya = Y(100 * ALONE[metric] / EX[metric]);
+      sc.append(sv("line", { x1: m.l, x2: W - m.r, y1: ya, y2: ya, stroke: C.small, "stroke-dasharray": "4 4", "stroke-width": 1.5 }));
+      sc.append(sv("text", { x: W - m.r, y: ya - 6, "text-anchor": "end", "font-size": 11, fill: C.ink2 }, "Qwen3-0.6B alone"));
+      // last:N frontier line
+      const line = ["last:6", "last:9", "last:12", "last:15", "last:18", "last:21", "last:24", "last:27", "last:30", "last:33", "all"].map(s => by[s]);
+      sc.append(sv("path", { d: line.map((d, i) => `${i ? "L" : "M"}${X(d.s8)} ${Y(100 * d[metric] / EX[metric])}`).join(" "),
+        fill: "none", stroke: C.xfer, "stroke-width": 2, opacity: .55 }));
+      // 8B exact
+      const ex = sv("path", { d: `M${X(1)} ${Y(100) - 7} l7 7 l-7 7 l-7 -7 z`, fill: C.big, stroke: "#fff", "stroke-width": 2 });
+      sc.append(ex); hover(ex, "<b>Qwen3-8B itself</b><br>1.00× · 100% by definition");
+      const labels = [sv("text", { x: X(1) - 4, y: Y(100) - 12, "font-size": 11, class: "kt-t-ink", "text-anchor": "middle" }, "Qwen3-8B itself")];
+      const labelled = new Set(["all", "last:18", "first:18", "keep:2", "every:2/nodelta", "keep:4/nodelta", cur]);
+      // label offsets [dx, dy, anchor] to keep the dense region readable
+      const OFF = { "last:18": [12, -10, "start"], "every:2": [-10, 16, "end"], "keep:2": [-10, 4, "end"], "every:2/nodelta": [12, 14, "start"],
+                    "first:18": [12, 4, "start"], "last:6": [10, 16, "start"], "last:9": [10, 16, "start"], "range:9-27": [10, 16, "start"] };
+      D.forEach(d => {
+        const x = X(d.s8), y = Y(100 * d[metric] / EX[metric]), on = d.spec === cur;
+        const fam = d.spec.split(":")[0];
+        const r = on ? 7 : 5;
+        let mark;
+        if (d.spec.includes("nodelta")) mark = sv("circle", { cx: x, cy: y, r, fill: "#fff", stroke: C.xfer, "stroke-width": 2 });
+        else if (fam === "first") mark = sv("rect", { x: x - r, y: y - r, width: 2 * r, height: 2 * r, rx: 2, fill: C.xfer, stroke: "#fff", "stroke-width": 2 });
+        else if (fam === "last" || fam === "all") mark = sv("circle", { cx: x, cy: y, r, fill: C.xfer, stroke: "#fff", "stroke-width": 2 });
+        else mark = sv("path", { d: `M${x} ${y - r - 1} l${r + 1} ${2 * r} h${-2 * r - 2} z`, fill: C.xfer, stroke: "#fff", "stroke-width": 1.5 });
+        sc.append(mark);
+        if (on) sc.append(sv("circle", { cx: x, cy: y, r: 12, fill: "none", stroke: C.ink, "stroke-width": 1.5 }));
+        if (labelled.has(d.spec)) {
+          const [dx, dy, an] = OFF[d.spec] || [10, -9, "start"];
+          labels.push(sv("text", { x: x + dx, y: y + dy, "font-size": 11, "text-anchor": an,
+            class: on ? "kt-t-strong" : "", "font-family": "monospace" }, d.spec));
+        }
+        const hit = sv("circle", { cx: x, cy: y, r: 13, fill: "transparent", style: "cursor:pointer", onclick: () => select(d.spec) });
+        hover(hit, () => `<b>${d.spec}</b> · ${d.s8.toFixed(2)}× at 8k<br>SQuAD ${pct(d.squad, EX.squad)}% · HotpotQA ${pct(d.hotpot, EX.hotpot)}% · GSM8K ${pct(d.gsm, EX.gsm)}%<br>click to inspect`);
+        sc.append(hit);
+      });
+      labels.forEach(t => sc.append(t));  // above every line and mark...
+      sc.querySelectorAll("circle[fill=transparent]").forEach(h => sc.append(h));  // ...and below the hover/click targets
+    }
+    tabs(scatterTabsSlot, ["GSM8K", "HotpotQA", "SQuAD"], i => { metric = ["gsm", "hotpot", "squad"][i]; drawScatter(); })(0);
+    select(cur);
+  })();
+
+  /* ------------------------------------------------------------------ experiment 1b: layer plan x native tail */
+  (function grid() {
+    const root = document.getElementById("kt-grid");
+    if (!root) return;
+    // generated by queues/grid_widget_data.py from results/qwen3/grid, kl_grid.json, latency_grid.json
+    const G = /*GRID*/{"exact":{"squad":0.7428,"hotpotqa":0.6101,"gsm8k":0.9275},"tails":[0,0.03125,0.0625,0.125,0.25],"cells":[{"plan":"all","native":0,"tail":0,"kl":0.1362,"s2":1.973,"s8":3.582,"s32":3.501,"squad":0.692,"hotpotqa":0.4542,"gsm8k":0.6475},{"plan":"all","native":0,"tail":0.03125,"kl":0.088,"s2":1.028,"s8":2.633,"s32":2.766,"squad":0.6909,"hotpotqa":0.4535,"gsm8k":0.81},{"plan":"all","native":0,"tail":0.0625,"kl":0.0736,"s2":1.033,"s8":2.541,"s32":2.455,"squad":0.6964,"hotpotqa":0.4524,"gsm8k":0.8925},{"plan":"all","native":0,"tail":0.125,"kl":0.0609,"s2":1.038,"s8":2.229,"s32":1.972,"squad":0.6791,"hotpotqa":0.4359,"gsm8k":0.895},{"plan":"all","native":0,"tail":0.25,"kl":0.0458,"s2":1.045,"s8":1.747,"s32":1.399,"squad":0.6765,"hotpotqa":0.4565,"gsm8k":0.9225},{"plan":"last:30","native":6,"tail":0,"kl":0.1299,"s2":1.713,"s8":2.337,"s32":2.237,"squad":0.6678,"hotpotqa":0.4467,"gsm8k":0.6425},{"plan":"last:30","native":6,"tail":0.03125,"kl":0.0855,"s2":0.995,"s8":1.894,"s32":1.969,"squad":0.6557,"hotpotqa":0.4469,"gsm8k":0.78},{"plan":"last:30","native":6,"tail":0.0625,"kl":0.0716,"s2":0.987,"s8":1.854,"s32":1.804,"squad":0.6679,"hotpotqa":0.4658,"gsm8k":0.8925},{"plan":"last:30","native":6,"tail":0.125,"kl":0.0586,"s2":0.992,"s8":1.737,"s32":1.567,"squad":0.659,"hotpotqa":0.4595,"gsm8k":0.895},{"plan":"last:30","native":6,"tail":0.25,"kl":0.0442,"s2":0.996,"s8":1.463,"s32":1.216,"squad":0.6918,"hotpotqa":0.4766,"gsm8k":0.925},{"plan":"last:24","native":12,"tail":0,"kl":0.1127,"s2":1.384,"s8":1.702,"s32":1.661,"squad":0.6816,"hotpotqa":0.492,"gsm8k":0.64},{"plan":"last:24","native":12,"tail":0.03125,"kl":0.0741,"s2":0.958,"s8":1.475,"s32":1.508,"squad":0.6832,"hotpotqa":0.4907,"gsm8k":0.815},{"plan":"last:24","native":12,"tail":0.0625,"kl":0.0622,"s2":0.959,"s8":1.476,"s32":1.429,"squad":0.6867,"hotpotqa":0.4867,"gsm8k":0.9025},{"plan":"last:24","native":12,"tail":0.125,"kl":0.051,"s2":0.961,"s8":1.383,"s32":1.293,"squad":0.6916,"hotpotqa":0.4889,"gsm8k":0.905},{"plan":"last:24","native":12,"tail":0.25,"kl":0.0382,"s2":0.968,"s8":1.251,"s32":1.075,"squad":0.7031,"hotpotqa":0.4738,"gsm8k":0.9175},{"plan":"last:18","native":18,"tail":0,"kl":0.0792,"s2":1.157,"s8":1.355,"s32":1.317,"squad":0.6743,"hotpotqa":0.5058,"gsm8k":0.81},{"plan":"last:18","native":18,"tail":0.03125,"kl":0.0512,"s2":0.871,"s8":1.219,"s32":1.238,"squad":0.682,"hotpotqa":0.506,"gsm8k":0.8875},{"plan":"last:18","native":18,"tail":0.0625,"kl":0.0428,"s2":0.883,"s8":1.217,"s32":1.184,"squad":0.6897,"hotpotqa":0.5195,"gsm8k":0.92},{"plan":"last:18","native":18,"tail":0.125,"kl":0.0347,"s2":0.902,"s8":1.177,"s32":1.106,"squad":0.6897,"hotpotqa":0.5246,"gsm8k":0.92},{"plan":"last:18","native":18,"tail":0.25,"kl":0.0252,"s2":0.899,"s8":1.098,"s32":0.963,"squad":0.6945,"hotpotqa":0.5372,"gsm8k":0.9175},{"plan":"last:12","native":24,"tail":0,"kl":0.0372,"s2":0.994,"s8":1.118,"s32":1.092,"squad":0.6957,"hotpotqa":0.5423,"gsm8k":0.9025},{"plan":"last:12","native":24,"tail":0.03125,"kl":0.0275,"s2":0.783,"s8":1.032,"s32":1.039,"squad":0.6947,"hotpotqa":0.5368,"gsm8k":0.92},{"plan":"last:12","native":24,"tail":0.0625,"kl":0.0235,"s2":0.796,"s8":1.038,"s32":1.009,"squad":0.6949,"hotpotqa":0.5516,"gsm8k":0.925},{"plan":"last:12","native":24,"tail":0.125,"kl":0.0185,"s2":0.816,"s8":1.018,"s32":0.967,"squad":0.7044,"hotpotqa":0.5713,"gsm8k":0.935},{"plan":"last:12","native":24,"tail":0.25,"kl":0.0137,"s2":0.822,"s8":0.975,"s32":0.876,"squad":0.7026,"hotpotqa":0.5752,"gsm8k":0.925},{"plan":"every:2","native":18,"tail":0,"kl":0.1068,"s2":1.086,"s8":1.278,"s32":1.26,"squad":0.6524,"hotpotqa":0.496,"gsm8k":0.8125},{"plan":"every:2","native":18,"tail":0.03125,"kl":0.0709,"s2":0.852,"s8":1.168,"s32":1.184,"squad":0.6691,"hotpotqa":0.4849,"gsm8k":0.8525},{"plan":"every:2","native":18,"tail":0.0625,"kl":0.0589,"s2":0.864,"s8":1.157,"s32":1.15,"squad":0.6722,"hotpotqa":0.4867,"gsm8k":0.9075},{"plan":"every:2","native":18,"tail":0.125,"kl":0.0479,"s2":0.868,"s8":1.133,"s32":1.077,"squad":0.6786,"hotpotqa":0.4732,"gsm8k":0.92},{"plan":"every:2","native":18,"tail":0.25,"kl":0.0363,"s2":0.861,"s8":1.069,"s32":0.947,"squad":0.7034,"hotpotqa":0.4809,"gsm8k":0.91}]}/*GRID*/;
+    const body = root.querySelector(".kt-body");
+    const plans = [...new Set(G.cells.map(c => c.plan))];
+    const tl = t => t === 0 ? "none" : "1/" + Math.round(1 / t);
+    const NAME = { gsm8k: "GSM8K", hotpotqa: "HotpotQA", squad: "SQuAD", kl: "fidelity KL" };
+    const cellOf = (p, t) => G.cells.find(c => c.plan === p && c.tail === t);
+    const val = (c, m) => m === "kl" ? c.kl : (c[m] == null ? null : 100 * c[m] / G.exact[m]);
+    const better = (a, b, m) => m === "kl" ? a < b : a > b;
+    const fmt = (v, m) => v == null ? "–" : m === "kl" ? v.toFixed(3) : Math.round(v) + "%";
+    const lo = [0xf1, 0xef, 0xfc], hi = [0x3f, 0x2f, 0xa8];  // single-hue (violet) sequential ramp: darker = better
+    const shade = x => `rgb(${lo.map((v, i) => Math.round(v + (hi[i] - v) * x)).join(",")})`;
+    const norm = (v, m) => m === "kl" ? Math.max(0, Math.min(1, (0.14 - v) / 0.13)) : Math.max(0, Math.min(1, (v - 60) / 40));
+    let metric = "gsm8k", sel = null, budget = 2.5;  // opens on the example the text discusses (all + 1/16)
+
+    const heat = el("div", { style: `display:grid;grid-template-columns:110px repeat(${G.tails.length},1fr);gap:4px;font-variant-numeric:tabular-nums` });
+    const slider = el("input", { type: "range", min: 1.0, max: 3.5, step: 0.05, value: budget, "aria-label": "minimum prefill speedup" });
+    const now = el("div", { class: "now" }), pick = el("div", { class: "kt-note", style: "margin-top:0" });
+    const sc = sv("svg", { viewBox: "0 0 860 300", class: "kt-svg" });
+    body.append(heat,
+      el("div", { class: "kt-sub", style: "margin-top:18px" }, "Speed budget: the best cell that is at least this fast (8k tokens)"),
+      el("div", { class: "kt-slider" }, slider, now), pick,
+      el("div", { class: "kt-sub", style: "margin-top:18px" }, "All 30 cells: prefill speedup vs quality (line = best quality reachable at each speed)"),
+      sc);
+    const tip = c => `<b>${c.plan}</b> · native tail ${tl(c.tail)} of the prompt<br>` +
+      `SQuAD ${fmt(val(c, "squad"), "squad")} · HotpotQA ${fmt(val(c, "hotpotqa"), "hotpotqa")} · GSM8K ${fmt(val(c, "gsm8k"), "gsm8k")}<br>` +
+      `KL ${c.kl.toFixed(3)} · speedup ${c.s2.toFixed(2)}× / ${c.s8.toFixed(2)}× / ${c.s32.toFixed(2)}× at 2k / 8k / 32k`;
+
+    function best() {
+      let b = null;
+      G.cells.forEach(c => { const v = val(c, metric); if (v != null && c.s8 >= budget && (!b || better(v, val(b, metric), metric))) b = c; });
+      return b;
+    }
+    function render() {
+      const b = best();
+      now.textContent = `≥ ${(+budget).toFixed(2)}×`;
+      pick.innerHTML = b ? `Best for ${NAME[metric]}: <b>${b.plan}</b> + native tail <b>${tl(b.tail)}</b> → ${fmt(val(b, metric), metric)}` +
+        (metric === "kl" ? "" : " of Qwen3-8B") + ` at ${b.s8.toFixed(2)}×` : "No cell is that fast.";
+      heat.innerHTML = "";
+      heat.append(el("div", { style: "font-size:11.5px;color:#8a8984;align-self:end;text-transform:uppercase;letter-spacing:.04em" }, "plan ↓ · tail →"));
+      G.tails.forEach(t => heat.append(el("div", { style: "text-align:center;font-size:12px;color:#52514e;align-self:end" }, tl(t))));
+      plans.forEach(p => {
+        const n = cellOf(p, 0).native;
+        heat.append(el("div", { style: "font-size:12.5px;align-self:center;line-height:1.25" },
+          el("span", { style: "font-family:var(--kt-mono)" }, p), el("br"), el("span", { style: "color:#8a8984;font-size:11px" }, `${n}/36 layers native`)));
+        G.tails.forEach(t => {
+          const c = cellOf(p, t), v = val(c, metric), x = v == null ? 0 : norm(v, metric);
+          const on = c === b, picked = c === sel;
+          const d = el("div", { style: `background:${v == null ? "#f3f2ee" : shade(x)};color:${x > 0.55 ? "#fff" : "#1b1b1a"};` +
+            `border-radius:6px;padding:7px 4px;text-align:center;cursor:pointer;` +
+            `outline:${on ? "2.5px solid #eb6834" : picked ? "2px solid #1b1b1a" : "none"};outline-offset:1px`,
+            onclick: () => { sel = c; render(); } },
+            el("div", { style: "font-weight:600;font-size:14px" }, fmt(v, metric)),
+            el("div", { style: "font-size:11px;opacity:.85" }, `${c.s8.toFixed(2)}×`));
+          hover(d, () => tip(c));
+          heat.append(d);
+        });
+      });
+      drawScatter(b);
+    }
+    function drawScatter(b) {
+      sc.innerHTML = "";
+      const W = 860, H = 300, m = { l: 50, r: 20, t: 24, b: 38 };
+      const lx = Math.log(0.9), hx = Math.log(4.0);
+      const X = v => m.l + (Math.log(v) - lx) / (hx - lx) * (W - m.l - m.r);
+      const pct = metric !== "kl";
+      const vmin = Math.min(...G.cells.map(c => val(c, metric)).filter(v => v != null));
+      const lo10 = Math.max(0, Math.floor((vmin - 3) / 10) * 10);  // fit the axis to the data (SQuAD spans ~88-95%)
+      const [y0, y1] = pct ? [lo10, 103] : [0.15, 0];
+      const Y = v => H - m.b - (v - y0) / (y1 - y0) * (H - m.t - m.b);
+      const step = (100 - lo10) / 10 > 4 ? 20 : 10;
+      const ticks = pct ? Array.from({ length: Math.floor((100 - lo10) / step) + 1 }, (_, i) => lo10 + i * step) : [0.15, 0.1, 0.05, 0];
+      ticks.forEach(v => {
+        sc.append(sv("line", { x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v), stroke: C.grid }));
+        sc.append(sv("text", { x: m.l - 8, y: Y(v) + 4, "text-anchor": "end", "font-size": 11 }, pct ? v + "%" : v.toFixed(2)));
+      });
+      [1, 1.5, 2, 3, 4].forEach(v => sc.append(sv("text", { x: X(v), y: H - m.b + 18, "text-anchor": "middle", "font-size": 11 }, v + "×")));
+      sc.append(sv("text", { x: 0, y: 12, "font-size": 11 }, pct ? `${NAME[metric]}, % of Qwen3-8B` : "fidelity KL (lower is better)"));
+      sc.append(sv("text", { x: W - m.r, y: H - 2, "text-anchor": "end", "font-size": 11 }, "prefill speedup at 8k tokens (log scale) →"));
+      const pts = G.cells.filter(c => val(c, metric) != null);
+      // frontier: walking from fastest to slowest, keep a cell if it beats everything faster than it
+      const fr = []; let run = null;
+      [...pts].sort((a, c) => c.s8 - a.s8).forEach(c => { const v = val(c, metric); if (run == null || better(v, run, metric)) { fr.push(c); run = v; } });
+      sc.append(sv("path", { d: fr.map((c, i) => `${i ? "L" : "M"}${X(c.s8)} ${Y(val(c, metric))}`).join(" "), fill: "none", stroke: C.ink, "stroke-width": 1.5, opacity: .5 }));
+      const labels = [], placed = [];
+      // label frontier cells from fastest to slowest, skipping any that would crowd a placed label (the pick always wins)
+      const show = new Set();
+      [...fr].sort((p, q) => (q === b) - (p === b) || q.s8 - p.s8).forEach(c => {
+        const x = X(c.s8), y = Y(val(c, metric));
+        if (placed.every(([px, py]) => Math.abs(px - x) > 85 || Math.abs(py - y) > 14)) { show.add(c); placed.push([x, y]); }
+      });
+      pts.forEach(c => {
+        const x = X(c.s8), y = Y(val(c, metric)), onF = fr.includes(c), isB = c === b;
+        sc.append(sv("circle", { cx: x, cy: y, r: onF ? 6 : 4.5, fill: C.xfer, "fill-opacity": c.tail === 0 ? 1 : 0.35 + 0.65 * (Math.log2(c.tail * 64) / 4),
+          stroke: isB ? C.ink : "#fff", "stroke-width": isB ? 2.5 : 1.5 }));
+        if (show.has(c)) labels.push(sv("text", { x: x + 9, y: y - 8, "font-size": 11, "font-family": "monospace", class: isB ? "kt-t-strong" : "" },
+          `${c.plan}${c.tail ? "+" + tl(c.tail) : ""}`));
+        const hit = sv("circle", { cx: x, cy: y, r: 11, fill: "transparent", style: "cursor:pointer", onclick: () => { sel = c; render(); } });
+        hover(hit, () => tip(c));
+        labels.push(hit);
+      });
+      labels.forEach(t => sc.append(t));
+    }
+    tabs(root.querySelector(".kt-tabs-slot"), ["GSM8K", "HotpotQA", "SQuAD", "Fidelity KL"], i => {
+      metric = ["gsm8k", "hotpotqa", "squad", "kl"][i]; render();
+    })(0);
+    slider.addEventListener("input", () => { budget = +slider.value; render(); });
+  })();
+
+  /* ------------------------------------------------------------------ experiment 2: hybrid 27B */
+  (function hybrid() {
+    const root = document.getElementById("kt-hybrid");
+    if (!root) return;
+    const body = root.querySelector(".kt-body");
+    // ridge-only plans (no KL training), state-only DeltaNet fill, HF bf16, batch 1
+    const P = { "all": [0.191, 2.25, 1.93], "keep:4": [0.121, 1.42, 1.40], "last:32": [0.099, 1.21, 1.17],
+                "every:4": [0.119, 1.02, 0.99], "last:16": [0.041, 0.98, 0.96] };
+    const attn = l => l % 4 === 3;
+    const chips = el("div", { class: "kt-chips" }), btn = {};
+    const cg = el("div", { class: "kt-chipgroup" }, el("i", {}, "plan"));
+    Object.keys(P).forEach(s => { btn[s] = el("button", { class: "kt-chip", type: "button", onclick: () => select(s) }, s); cg.append(btn[s]); });
+    chips.append(cg);
+    const svg = sv("svg", { viewBox: "0 0 860 122", class: "kt-svg" });
+    const stats = el("div", { class: "kt-stats" });
+    const lg = legend([[C.big, "native: Qwen3.8-27B runs the layer"], [C.xfer, "transferred from Qwen3.5-4B"]]);
+    lg.append(el("span", {}, el("b", { style: "font-size:11px;color:#1b1b1a" }, "▲"), "full-attention layer (16); the other 48 are Gated DeltaNet"));
+    body.append(chips, lg, svg, stats);
+    function select(s) {
+      Object.entries(btn).forEach(([k, b]) => b.classList.toggle("on", k === s));
+      svg.innerHTML = "";
+      const p = strip(svg, s, 64, { label: "Qwen3.8-27B", attn, y: 30,
+        tipFor: (l, isT, a) => `<b>layer ${l}</b> · ${a ? "full attention" : "Gated DeltaNet"}<br>` +
+          (!isT ? "native: computed by the 27B over the prompt" :
+            a ? "transferred: K, V mapped from the 4B, 27B RoPE re-applied" :
+                "transferred: the mapper predicts this layer's input; the 27B's own DeltaNet kernel turns it into the recurrent + conv state (state only, no output)") });
+      const d = P[s];
+      stats.innerHTML = "";
+      [["prefill speedup", `${d[1].toFixed(2)}×`, `at 8k tokens · ${d[0] === 0.191 ? "same 2.2–2.4× up to 128k" : "ridge stand-ins"}`],
+       ["layers the 27B still runs", `${64 - p.n} / 64`, `${p.n} transferred`],
+       ["fidelity KL (ridge only)", f3(d[0]), s === "all" ? "→ 0.069 after KL training" : "not trained"]].forEach(([k, v, s2]) =>
+        stats.append(el("div", { class: "kt-stat" }, el("div", { class: "k" }, k), el("div", { class: "v" }, v), el("div", { class: "s" }, s2))));
+    }
+    select("all");
+  })();
+
+  /* ------------------------------------------------------------------ experiment 3: long-context timing */
+  (function longTiming() {
+    const root = document.getElementById("kt-long");
+    if (!root) return;
+    const body = root.querySelector(".kt-body");
+    const LEN = ["8k", "16k", "32k", "64k", "128k", "248k"], TOK = [8137, 16326, 32713, 65492, 131045, 253989];
+    const HF = { big: [0.859, 1.747, 3.701, 8.255, 19.867, null], xfer: [0.398, 0.801, 1.684, 3.635, 8.427, null], small: [0.177, 0.368, 0.800, 1.851, 4.816, null] };
+    const SG = { big: [0.678, 1.396, 2.977, 6.607, 15.937, 40.716], small: [0.115, 0.240, 0.539, 1.315, 3.543, 10.102] };
+    const slider = el("input", { type: "range", min: 0, max: 5, step: 1, value: 4, "aria-label": "context length" });
+    const now = el("div", { class: "now" });
+    body.append(el("div", { class: "kt-slider" }, el("span", { style: "color:#52514e;font-size:13px" }, "context length"), slider, now));
+    const panels = el("div");
+    body.append(panels);
+    const line = sv("svg", { viewBox: "0 0 860 230", class: "kt-svg" });
+    body.append(el("div", { class: "kt-sub", style: "margin-top:20px" }, "Speedup over the 27B's own prefill"),
+      legend([[C.xfer, "4B + transfer, measured (HF)"], [C.muted, "27B ÷ 4B time to first token (SGLang): the ceiling"]]), line);
+    function panel(title, rows, i, max) {
+      const g = el("div", { class: "kt-bars", style: "grid-template-columns:150px 1fr 120px" });
+      rows.forEach(([lab, arr, col, ref]) => {
+        const v = arr[i];
+        const tr = el("div", { class: "kt-track" });
+        if (v != null) tr.append(el("div", { class: "kt-fill", style: `width:${100 * v / max}%;background:${col}` }));
+        hover(tr, v == null ? "not measured: the unchunked HF prefill of the 27B runs out of memory at 248k" :
+          `<b>${lab}</b>: ${v.toFixed(2)} s at ${TOK[i].toLocaleString()} tokens` + (ref ? `<br>${(ref[i] / v).toFixed(2)}× faster than the 27B` : ""));
+        g.append(el("div", { class: "lab" }, lab), tr,
+          el("div", { class: "val" }, v == null ? "OOM unchunked" : `${v.toFixed(2)} s` + (ref ? ` · ${(ref[i] / v).toFixed(2)}×` : "")));
+      });
+      return el("div", {}, el("div", { class: "kt-sub" }, title), g);
+    }
+    function render() {
+      const i = +slider.value;
+      now.textContent = `${LEN[i]} tokens`;
+      const max = Math.max(...[HF.big[i], SG.big[i]].filter(v => v != null));
+      panels.innerHTML = "";
+      panels.append(
+        panel("HuggingFace, 1 GPU, end to end (what I can run today)", [["Qwen3.8-27B prefill", HF.big, C.big], ["4B + transfer", HF.xfer, C.xfer, HF.big], ["4B prefill alone", HF.small, C.small, HF.big]], i, max),
+        panel("SGLang native serving, time to first token", [["Qwen3.8-27B", SG.big, C.big], ["Qwen3.5-4B", SG.small, C.small, SG.big]], i, max));
+      drawLine(i);
+    }
+    function drawLine(sel) {
+      line.innerHTML = "";
+      const W = 860, H = 230, m = { l: 50, r: 70, t: 14, b: 34 };
+      const X = i => m.l + i / 5 * (W - m.l - m.r), Y = v => H - m.b - v / 6.5 * (H - m.t - m.b);
+      [0, 1, 2, 3, 4, 5, 6].forEach(v => {
+        line.append(sv("line", { x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v), stroke: v === 1 ? C.rule : C.grid }));
+        line.append(sv("text", { x: m.l - 8, y: Y(v) + 4, "text-anchor": "end", "font-size": 11 }, v + "×"));
+      });
+      LEN.forEach((t, i) => line.append(sv("text", { x: X(i), y: H - m.b + 18, "text-anchor": "middle", "font-size": 11, class: i === sel ? "kt-t-strong" : "" }, t)));
+      line.append(sv("line", { x1: X(sel), x2: X(sel), y1: m.t, y2: H - m.b, stroke: C.ink, opacity: .25 }));
+      const series = [[HF.xfer.map((v, i) => v == null ? null : HF.big[i] / v), C.xfer, ""],
+                      [SG.small.map((v, i) => SG.big[i] / v), C.muted, "5 4"]];
+      series.forEach(([vals, col, dash], si) => {
+        const pts = vals.map((v, i) => v == null ? null : [X(i), Y(v), v, i]).filter(Boolean);
+        line.append(sv("path", { d: pts.map((p, k) => `${k ? "L" : "M"}${p[0]} ${p[1]}`).join(" "), fill: "none", stroke: col, "stroke-width": 2, "stroke-dasharray": dash }));
+        pts.forEach(p => {
+          line.append(sv("circle", { cx: p[0], cy: p[1], r: p[3] === sel ? 6 : 4, fill: col, stroke: "#fff", "stroke-width": 2 }));
+          const hit = sv("circle", { cx: p[0], cy: p[1], r: 12, fill: "transparent" });
+          hover(hit, `<b>${LEN[p[3]]}</b>: ${p[2].toFixed(2)}× ${si ? "(SGLang 27B ÷ 4B)" : "(HF, 4B + transfer vs 27B)"}`);
+          line.append(hit);
+        });
+        const last = pts[pts.length - 1];
+        line.append(sv("text", { x: last[0] + 10, y: last[1] + 4, "font-size": 11, class: "kt-t-ink" }, `${last[2].toFixed(1)}×`));
+      });
+    }
+    slider.addEventListener("input", render);
+    render();
+  })();
+
+  /* ------------------------------------------------------------------ experiment 3: LongBench v2 grid */
+  (function longbench() {
+    const root = document.getElementById("kt-lb");
+    if (!root) return;
+    // [prompt tokens, Qwen3.8-27B correct, 4B+transfer correct, Qwen3.5-4B alone correct], sorted by length
+    const R = [[10182,0,0,0],[10769,0,0,0],[10865,1,1,1],[10920,0,1,0],[11343,0,1,1],[12715,0,0,0],[13065,0,1,1],[13085,0,0,0],[15238,0,0,0],[15512,1,0,0],[16600,1,0,0],[16710,1,0,1],[16743,1,1,1],[17046,0,0,0],[17693,1,1,1],[17738,0,1,0],[17782,1,0,0],[18208,1,1,1],[18354,0,0,1],[18983,1,1,0],[19111,1,1,0],[19274,0,0,0],[19445,0,1,0],[19657,1,1,1],[20072,0,0,0],[21130,1,1,0],[23457,0,1,1],[24392,0,0,0],[24502,1,1,1],[24950,0,0,0],[24992,1,1,1],[25158,1,0,1],[25260,0,0,0],[25585,1,1,1],[26012,0,0,0],[27610,0,0,0],[28990,1,0,1],[28990,1,1,1],[29090,1,1,0],[29571,0,1,0],[29780,1,0,0],[29895,0,0,0],[30083,0,0,0],[33771,0,0,0],[38285,0,0,1],[39519,0,1,0],[41397,0,0,0],[41437,0,1,1],[41442,1,1,1],[41893,1,1,0],[42854,1,1,1],[44728,0,0,0],[44872,1,1,1],[45034,0,0,0],[45090,0,0,0],[45384,0,0,1],[45771,1,1,1],[46091,0,0,0],[46875,1,1,1],[48265,1,1,1],[50370,1,1,1],[52607,1,1,0],[53994,1,1,0],[54323,0,0,0],[55655,1,1,0],[55847,1,1,0],[55874,1,1,0],[58154,0,0,0],[60031,1,1,1],[62434,0,0,0],[63616,0,1,0],[65619,1,1,1],[68642,0,0,0],[70107,1,1,1],[70815,1,1,1],[75465,1,1,1],[75544,1,1,1],[77941,0,0,0],[77941,1,1,0],[78448,1,1,1],[78621,1,1,1],[80054,1,0,0],[88465,1,0,1],[88621,0,0,0],[93287,0,0,0],[96556,1,1,1],[98562,0,0,0],[98562,0,0,0],[98940,0,0,0],[99387,1,1,0],[100210,0,0,0],[100210,0,0,0],[100210,1,1,1],[102524,0,0,0],[102524,0,0,0],[103811,1,1,0],[107550,1,0,0],[116195,1,1,1],[117930,1,0,0],[119766,1,0,1]];
+    const body = root.querySelector(".kt-body");
+    const M = [["Qwen3.8-27B", 1, C.big], ["4B + transfer", 2, C.xfer], ["Qwen3.5-4B alone", 3, C.small]];
+    const grid = el("div", { class: "kt-grid100" }), leg = el("div"), summary = el("div");
+    body.append(leg, grid, summary);
+    function render(mode) {
+      grid.innerHTML = ""; leg.innerHTML = "";
+      if (mode < 3) {
+        const [name, k, col] = M[mode];
+        leg.append(legend([[col, `${name} correct`], [C.none, "wrong"]]));
+        R.forEach(r => { const c = el("div", { style: `background:${r[k] ? col : C.none}` });
+          hover(c, `<b>${r[0].toLocaleString()} tokens</b><br>${M.map(m => `${m[0]}: ${r[m[1]] ? "✓" : "✗"}`).join("<br>")}`); grid.append(c); });
+      } else {
+        const cats = [[C.ink2, "both right"], [C.big, "only the 27B right"], [C.xfer, "only transfer right"], [C.none, "both wrong"]];
+        leg.append(legend(cats));
+        R.forEach(r => { const i = r[1] && r[2] ? 0 : r[1] ? 1 : r[2] ? 2 : 3; const c = el("div", { style: `background:${cats[i][0]}` });
+          hover(c, `<b>${r[0].toLocaleString()} tokens</b><br>${cats[i][1]}`); grid.append(c); });
+      }
+    }
+    const buckets = [[0, 32768, "10k–32k"], [32768, 65536, "32k–64k"], [65536, 1e9, "64k–120k"]];
+    const rows = buckets.map(([a, b, lab]) => { const s = R.filter(r => r[0] >= a && r[0] < b);
+      return [lab + ` (${s.length} q)`, ...[1, 2, 3].map(k => (s.reduce((t, r) => t + r[k], 0) / s.length).toFixed(2))]; });
+    rows.push({ hl: 1, cells: ["all 100", "0.52", "0.50", "0.39"] });
+    summary.append(el("div", { class: "kt-sub", style: "margin-top:16px" }, "Accuracy by prompt length"),
+      table(["bucket", "Qwen3.8-27B", "4B + transfer", "Qwen3.5-4B alone"], rows),
+      el("div", { class: "kt-note" }, "4-way multiple choice, so chance is 0.25. Transfer gives the same answer as the 27B on 78 of 100 questions (and as the 4B on 73)."));
+    tabs(root.querySelector(".kt-tabs-slot"), ["Qwen3.8-27B", "4B + transfer", "4B alone", "transfer vs 27B"], render)(1);
+  })();
+
+  /* ------------------------------------------------------------------ experiment 5: token alignment */
+  (function align() {
+    const root = document.getElementById("kt-align");
+    if (!root) return;
+    // Real tokenizations (HF tokenizers, offsets) of the sentence below.
+    const TEXT = "The Kilimanjaro expedition costs $12,450 and takes approximately seven days.";
+    const QW = [["The",0,3],[" Kil",3,7],["iman",7,11],["j",11,12],["aro",12,15],[" expedition",15,26],[" costs",26,32],[" $",32,34],["1",34,35],["2",35,36],[",",36,37],["4",37,38],["5",38,39],["0",39,40],[" and",40,44],[" takes",44,50],[" approximately",50,64],[" seven",64,70],[" days",70,75],[".",75,76]];
+    const GE = [["The",0,3],[" Kilim",3,9],["anj",9,12],["aro",12,15],[" expedition",15,26],[" costs",26,32],[" $",32,34],["1",34,35],["2",35,36],[",",36,37],["4",37,38],["5",38,39],["0",39,40],[" and",40,44],[" takes",44,50],[" approximately",50,64],[" seven",64,70],[" days",70,75],[".",75,76]];
+    const body = root.querySelector(".kt-body");
+    const box = el("div", { class: "kt-align" }), note = el("div", { class: "kt-note" });
+    body.append(box, note);
+    function render(dir) {
+      const big = dir ? QW : GE, small = dir ? GE : QW;
+      const bigName = dir ? "Qwen3-14B (big)" : "Gemma3-12B (big)", smallName = dir ? "Gemma3-4B (small)" : "Qwen3-4B (small)";
+      const off = 7, K = 1.4; // ch offset for the <bos> chip; ch per character (room for borders)
+      const X = c => `${(off + c * K).toFixed(2)}ch`, Wd = n => `${(n * K).toFixed(2)}ch`;
+      box.innerHTML = "";
+      const inner = el("div", { class: "inner", style: `width:${off + TEXT.length * K + 1}ch` });
+      inner.append(el("div", { class: "kt-rowlab", style: "top:2px" }, bigName + " tokens"), el("div", { class: "kt-rowlab", style: "top:134px" }, smallName + " tokens"));
+      const smallEls = small.map(([t, a, b]) => { const e = el("div", { class: "kt-tok small", style: `left:${X(a)};width:${Wd(b - a)}` }, t); inner.append(e); return e; });
+      const owner = c => small.findIndex(([, a, b]) => c >= a && c < b);
+      // big <bos> (Gemma always has one; Qwen3 has none)
+      if (!dir) {
+        const bos = el("div", { class: "kt-tok big", style: `left:0ch;width:6ch;border-style:dashed` }, "<bos>");
+        hover(bos, "<b>&lt;bos&gt;</b>: the attention-sink position. Its K, V are taken exactly from the big model (a one-token prefill), never mapped.");
+        inner.append(bos);
+      }
+      big.forEach(([t, a, b], i) => {
+        const j = owner(b - 1);
+        const e = el("div", { class: "kt-tok big", style: `left:${X(a)};width:${Wd(b - a)}` }, t);
+        const link = el("div", { class: "kt-link", style: `left:${X(b - 0.5)}` });
+        inner.append(link, e);
+        const on = () => { inner.querySelectorAll(".kt-tok").forEach(x => x.classList.add("dim")); e.classList.remove("dim"); e.classList.add("hot");
+          smallEls[j].classList.remove("dim"); smallEls[j].classList.add("hot"); link.classList.add("hot");
+          note.innerHTML = `Big token <b>${JSON.stringify(t)}</b> (characters ${a}–${b}) ends inside small token <b>${JSON.stringify(small[j][0])}</b>, so it reads that position's small-model states, plus its own big-model token embedding.`; };
+        const off_ = () => { inner.querySelectorAll(".kt-tok").forEach(x => x.classList.remove("dim", "hot")); link.classList.remove("hot"); idle(); };
+        e.addEventListener("mouseenter", on); e.addEventListener("mouseleave", off_);
+      });
+      box.append(inner);
+      function idle() { note.innerHTML = "Hover a big-model token. Each one reads the small-model position whose token covers its <b>last character</b>: the whole prompt is known at prefill time, so peeking at a later small token inside the same span leaks nothing."; }
+      idle();
+    }
+    tabs(root.querySelector(".kt-tabs-slot"), ["Qwen3-4B → Gemma3-12B", "Gemma3-4B → Qwen3-14B"], render)(0);
+  })();
+})();
+</script>
