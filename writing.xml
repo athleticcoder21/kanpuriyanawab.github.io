@@ -20,21 +20,23 @@
 
 
 
-<div class="kt kt-tldr">
-  <div class="k">TL;DR</div>
-  <p>A small model reads the prompt, a learned per-layer linear map turns its states into the big model's KV cache, and the frozen big model answers from that cache without ever reading the prompt itself. I reproduced this, then ran six experiments across several setups:</p>
-  <ul>
-    <li><b>Partial-layer transfer is a dial.</b> Let Qwen3-8B compute its own bottom layers and transfer only the top ones: GSM8K climbs from 69% of the 8B (everything transferred, 3.8× faster prefill) to 88% (half the layers, 1.35×) to 97% (a third, 1.14×). Transferring the <i>bottom</i> layers instead collapses to 13%.</li>
-    <li><b>A second dial, a native tail, fixes reasoning cheaply.</b> Let the 8B read the last 1/16 of the prompt itself and keep everything else transferred: GSM8K goes from 70% to 96% of the 8B at 2.5× faster prefill. It does nothing for multi-hop QA, which only native layers fix.</li>
-    <li><b>It works on a hybrid DeltaNet model.</b> Qwen3.5-4B → Qwen3.8-27B: 2.2–2.4× faster prefill out to 128k tokens, LongBench v2 0.50 vs the 27B's 0.52 (4B alone: 0.39), and 100% needle retrieval out to 248k tokens.</li>
-    <li><b>Dense → MoE transfers fine but buys nothing</b>: a 3B-active MoE prefills about as fast as the 4B that would replace it.</li>
-    <li><b>Cross-family transfer carries content but isn't useful yet.</b> Qwen3-4B → Gemma3-12B reaches ~70% of the 12B on QA, below what the small model gets alone. The reverse direction mostly fails.</li>
-  </ul>
-</div>
-<section id="cache-transfer-in-one-picture" class="level2">
-<h2 class="anchored" data-anchor-id="cache-transfer-in-one-picture">Cache transfer in one picture</h2>
-<p>When a transformer reads a prompt, every layer writes keys and values into the KV cache, and decoding attends over that cache. For long prompts, building it (prefill) is where the time goes. The cost scales with the size of the model doing the reading.</p>
-<p>OneTriangle’s post <a href="https://onetriangle.ai/blog/cache-transfer"><em>How do we transfer context between models?</em></a> asks a simple question. What if a small model does the reading, and a cheap learned function translates its cache into the cache the big model <em>would</em> have built? Their headline pair is Qwen3.5-4B → Qwen3.8-27B. I wanted to see how far this goes, and where it breaks.</p>
+<p>A model lab recently launched a <a href="https://x.com/hannah_chuu/status/2122408763915477217?a=5TYRFYJkAs3yCumU--s&amp;s=20">KV Prefill SDK</a>. They showed that a smaller model like Qwen3.5-4B can handle prefill for a bigger model. Since the smaller model does less compute, this can save a lot of prefill time.</p>
+<p>That got me thinking. If a small model can read for a bigger one, how much of that work can we actually hand over? Does the big model need a transferred cache for every layer, or can it do part of the prefill itself? And does this still work when the context gets much longer, or when the two models have different architectures and tokenizers?</p>
+<p>I wanted to find out, so I started with a reproduction and followed those questions through a set of experiments:</p>
+<ul>
+<li>Can I reproduce the basic recipe?</li>
+<li>What happens if I transfer only some layers?</li>
+<li>What if the big model reads the end of the prompt itself?</li>
+<li>Can this work with a hybrid DeltaNet model?</li>
+<li>Does it hold up on long contexts?</li>
+<li>Can a dense model prefill for a mixture of experts?</li>
+<li>What happens across model families and tokenizers?</li>
+</ul>
+<p>Before getting into those experiments, here is a quick primer on the KV cache and what gets transferred.</p>
+<section id="a-quick-primer-on-kv-cache" class="level2">
+<h2 class="anchored" data-anchor-id="a-quick-primer-on-kv-cache">A quick primer on KV cache</h2>
+<p>When a transformer reads a prompt, its layers write keys and values to the KV cache. The model then uses that cache to generate an answer. Building the cache is called prefill, and it can take a while for long prompts. A bigger model generally needs more compute to do this work.</p>
+<p>In <a href="https://onetriangle.ai/blog/cache-transfer"><em>How do we transfer context between models?</em></a>, OneTriangle explore an interesting idea: let a small model read the prompt, then use a learned mapper to turn its states into a cache the bigger model can use. Their main example is Qwen3.5-4B → Qwen3.8-27B. I wanted to reproduce the idea and see where it works and where it breaks.</p>
 <figure class="kt kt-fig figure" id="kt-method">
   <div class="kt-head"><div class="kt-tabs-slot"></div><button class="kt-setup-btn" type="button">ⓘ Setup</button></div>
   <div class="kt-frame">
@@ -57,9 +59,9 @@
 <li><strong>Speed:</strong> wall-clock prefill at batch 1, best of 3, unless stated otherwise.</li>
 </ul>
 </section>
-<section id="experiment-0-reproducing-the-recipe-on-qwen3-0.6b-qwen3-8b" class="level2">
-<h2 class="anchored" data-anchor-id="experiment-0-reproducing-the-recipe-on-qwen3-0.6b-qwen3-8b">Experiment 0: reproducing the recipe on Qwen3-0.6B → Qwen3-8B</h2>
-<p>Before trying anything new I rebuilt the method on the smallest Qwen3 pair. The ridge map alone gets surprisingly far (KL 0.42, where “no prefix at all” is 0.73). The KL-trained low-rank correction takes it to 0.13, and that is the jump that matters.</p>
+<section id="reproduction" class="level2">
+<h2 class="anchored" data-anchor-id="reproduction">Experiment 0: reproducing the recipe on Qwen3-0.6B → Qwen3-8B</h2>
+<p>I started by reproducing the method with Qwen3-0.6B and Qwen3-8B. The ridge map alone gets a KL of 0.42; giving the 8B no prefix at all gives 0.73. Adding the KL-trained low-rank correction brings it down to 0.13. That second step makes a big difference.</p>
 <figure class="kt kt-fig figure" id="kt-repro">
   <div class="kt-head"><div class="kt-tabs-slot"></div><button class="kt-setup-btn" type="button">ⓘ Setup</button></div>
   <div class="kt-frame">
@@ -71,7 +73,7 @@
   </div>
   <figcaption>The reproduction, tab by tab. <b>Tasks</b>: the mapped cache keeps 98% of the 8B on extractive QA but only 72% on GSM8K. <b>Small-model size</b>: a bigger small model maps better, but once it is good enough it beats the transfer on its own. <b>Keys vs values</b>: values are the hard half.</figcaption>
 </figure>
-<p>Three things from this round shaped everything after it.</p>
+<p>A few things stood out from this first set of runs:</p>
 <ol type="1">
 <li><strong>Extractive QA is easy; reasoning is not.</strong> SQuAD survives transfer almost perfectly. Multi-hop QA and GSM8K, where the answer is computed rather than copied, lose a quarter or more.</li>
 <li><strong>The baseline that matters is “small model alone”, not “closed book”.</strong> With Qwen3-4B as the reader, the 4B on its own scores 0.915 on GSM8K and the transfer 0.877. The comparison only makes sense when the small model is clearly worse than the big one at the task.</li>
@@ -79,10 +81,10 @@
 </ol>
 <p>On the new machine I re-ran the exact round-3 command. The fidelity KL came back at 0.129 against the original 0.128. Task scores moved by ±0.02–0.04 between independent training runs, which is the noise floor to keep in mind for every table below.</p>
 </section>
-<section id="experiment-1-partial-layer-transfer" class="level2">
-<h2 class="anchored" data-anchor-id="experiment-1-partial-layer-transfer">Experiment 1: partial-layer transfer</h2>
-<p>Hybrid models like Qwen3.5 interleave a few attention layers with many linear-attention layers. That suggested a question: does the big model need a transferred cache for <em>every</em> layer? Or can it compute some layers itself and borrow the rest? If it can, the fraction transferred becomes a dial between prefill speed and quality.</p>
-<p>To make that possible, the big model runs its own decoder loop over the prompt, but each transferred layer is replaced by a stand-in:</p>
+<section id="partial-layers" class="level2">
+<h2 class="anchored" data-anchor-id="partial-layers">Experiment 1: partial-layer transfer</h2>
+<p>The reproduction worked, but the gap on reasoning made me wonder if the 8B needed to do some of the reading itself. Qwen3.5 mixes attention layers with linear-attention layers, which gave me a place to start: do we need to transfer every layer? Maybe the big model can compute some layers itself and use the small model’s cache for the rest. That would let us trade some prefill speed for better quality.</p>
+<p>To try this, I let the big model run over the prompt and replace each transferred layer with a stand-in:</p>
 <ul>
 <li>The stand-in writes mapped K, V into the cache and skips the layer’s compute.</li>
 <li>A run of transferred layers followed by a native layer leaves a hole in the residual stream. A second mapped term, <strong>Δ</strong>, fills it: a prediction of how much the skipped block would have changed the hidden state.</li>
@@ -107,18 +109,18 @@
   </div>
   <figcaption>Pick a plan to see which layers the 8B still computes, where the residual Δ bridges a gap, and what it costs. In the scatter, the line traces <code>last:N</code> from 6 to 36 transferred layers. Squares are <code>first:N</code>, triangles are interleaved plans, hollow circles have no Δ. Click any point to inspect it.</figcaption>
 </figure>
-<p>The picture is clean:</p>
+<p>Here is what I found:</p>
 <ul>
 <li><strong>Bottom layers must stay native; top layers transfer well.</strong> Along <code>last:N</code>, GSM8K climbs smoothly as more of the bottom is computed natively: 69% → 76% → 88% → 94% → 97% of the 8B for 30 / 21 / 18 / 15 / 12 transferred layers. Speedup falls 2.4× → 1.55× → 1.35× → 1.23× → 1.14× along the way. Transferring the bottom half instead (<code>first:18</code>) is a disaster on GSM8K: 13%.</li>
 <li><strong>The knee is around 15–18 native layers out of 36.</strong> Above that you get most of the quality back. Below about 9 native layers, nothing beats transferring everything: you pay for the 8B’s layers and still sit near the all-transferred quality.</li>
 <li><strong>Interleaving works only if layer 0 is native.</strong> <code>every:2</code> (layer 0 native) lands right on the <code>last:18</code> point, 87% GSM8K at 1.31×. <code>keep:2</code> (layer 0 transferred) drops to 59%. Layer 0 is where the attention sink lives, and errors there propagate through everything above it.</li>
 <li><strong>Δ is not optional.</strong> Without the mapped residual, interleaved plans sit around 50% on every task. That makes them worse than transferring everything, at a similar speed.</li>
 </ul>
-<p>One caveat on the speed numbers: they come from a 0.6B → 8B pair in HuggingFace, where the small model and the mapper are a sizeable share of the cost. With a bigger target, every native layer you give back costs more, so the same plan buys a larger speedup.</p>
+<p>One caveat: these speed numbers are for 0.6B → 8B in HuggingFace. Here, the small model and mapper make up a sizeable part of the cost. The trade-off may look different with a bigger target, where each native layer costs more.</p>
 </section>
-<section id="experiment-1b-the-second-dial-a-native-tail" class="level2">
-<h2 class="anchored" data-anchor-id="experiment-1b-the-second-dial-a-native-tail">Experiment 1b: the second dial, a native tail</h2>
-<p>Layers are one dial. Tokens are another. Instead of transferring the whole prompt, the big model can prefill the last part of it itself, on top of the mapped cache for everything before. Back in round 2 this closed a lot of the fidelity gap: letting the 8B prefill the last 512 tokens took KL from 0.135 to 0.047. So I crossed the two dials: 6 layer plans × 5 tail sizes, 30 cells, every one evaluated on the same 300 / 300 / 400 prompts.</p>
+<section id="native-tail" class="level2">
+<h2 class="anchored" data-anchor-id="native-tail">Experiment 1b: letting the big model read the tail</h2>
+<p>Transferring fewer layers helped, but it also gave up some speed. That made me think about splitting the work another way: by tokens. Instead of transferring the whole prompt, the big model can read the last part itself, using the mapped cache for everything before it. In round 2, letting the 8B prefill the last 512 tokens brought KL down from 0.135 to 0.047. I combined this with partial-layer transfer: 6 layer plans and 5 tail sizes, evaluated on the same 300 / 300 / 400 prompts.</p>
 <p>The tail is set as a fraction of the prompt (none, 1/32, 1/16, 1/8, 1/4), not a token count, so its cost means the same thing on a 1.1k-token GSM8K prompt and a 4.5k-token HotpotQA one. Nothing is retrained: these are the Experiment 1 mappers, which never saw a tail during training. The tail is a pure inference-time knob.</p>
 <figure class="kt kt-fig figure" id="kt-grid">
   <div class="kt-head"><div class="kt-tabs-slot"></div><button class="kt-setup-btn" type="button">ⓘ Setup</button></div>
@@ -135,7 +137,7 @@
   </div>
   <figcaption>Each cell shows quality as a % of Qwen3-8B (darker is better) and the prefill speedup at 8k tokens. Switch the task with the tabs, hover a cell for every number, and drag the speed budget to see the best setting that is at least that fast. In the scatter, more opaque points have a longer tail.</figcaption>
 </figure>
-<p>The two dials fix different things:</p>
+<p>The two choices help in different ways:</p>
 <ul>
 <li><strong>On GSM8K the tail is the dial that matters.</strong> With every layer transferred, a tail of just 1/16 of the prompt takes GSM8K from 70% to 96% of the 8B, while prefill is still 2.5× faster at 8k tokens. For comparison, the best layer-only plan at similar quality, <code>last:12</code>, is barely faster than the 8B itself (1.12×). In this setup the math question is the last ~5% of the transferred prompt (median 5.3%), so a short tail means the 8B reads the question itself while the eight exemplars stay transferred. A 1/16 tail covers the whole question in two thirds of the prompts; even 1/32, which covers it fully in only 6%, already gets GSM8K to 87%.</li>
 <li><strong>On HotpotQA the tail does nothing.</strong> <code>all</code> sits at 74% for every tail size. The question is already read natively there; what transfer loses is multi-hop reasoning over the documents, and only native <em>layers</em> bring that back (89% at <code>last:12</code>, up to 94% with a tail on top).</li>
@@ -144,9 +146,9 @@
 </ul>
 <p>The practical rule: <strong>put the part that must be exact at the end, and let the big model read it.</strong> For a prompt that ends in a question or an instruction, a native tail of a few percent buys back most of the quality at most of the speedup. For reasoning spread across a long context, it has to be native layers instead.</p>
 </section>
-<section id="experiment-2-a-hybrid-big-model-qwen3.5-4b-qwen3.8-27b" class="level2">
-<h2 class="anchored" data-anchor-id="experiment-2-a-hybrid-big-model-qwen3.5-4b-qwen3.8-27b">Experiment 2: a hybrid big model (Qwen3.5-4B → Qwen3.8-27B)</h2>
-<p>This is the pair from the OneTriangle post, and the one that matters most in practice. Both models are hybrids: three out of four layers are <strong>Gated DeltaNet</strong> (linear attention with a recurrent state and a short convolution), and only one in four is full attention.</p>
+<section id="hybrid" class="level2">
+<h2 class="anchored" data-anchor-id="hybrid">Experiment 2: a hybrid big model (Qwen3.5-4B → Qwen3.8-27B)</h2>
+<p>So far I had been using a small Qwen3 pair to explore these choices. Next I wanted to try the pair from the OneTriangle post: Qwen3.5-4B and Qwen3.8-27B. Both are hybrid models. Three out of four layers use <strong>Gated DeltaNet</strong>, a linear-attention layer with a recurrent state and a short convolution. The remaining layers use full attention.</p>
 <p>A DeltaNet layer has no per-token KV cache to map. Its “cache” is a fixed-size recurrent state that summarises the whole prefix. Mapping that state directly would mean predicting a large matrix from a sequence, so I don’t. Instead, for each DeltaNet layer the mapper predicts the layer’s <strong>input</strong>. The 27B’s own DeltaNet kernel then runs over that input in a state-only mode: it builds the recurrent and convolution state and skips the output projection. Attention layers get mapped K and V as usual.</p>
 <figure class="kt kt-fig figure" id="kt-hybrid">
   <div class="kt-head"><div class="kt-title">Qwen3.8-27B: 64 layers, 16 of them full attention</div><button class="kt-setup-btn" type="button">ⓘ Setup</button></div>
@@ -159,7 +161,7 @@
   </div>
   <figcaption>Transferring everything is 2.25× faster than the 27B's own prefill. Keeping the 16 attention layers native (<code>keep:4</code>) is the natural partial plan for a hybrid model, but it only buys 1.42×. Ridge KL is noticeably better for the partial plans, and none of them were trained.</figcaption>
 </figure>
-<p>On the short-context tasks, transfer works but gets beaten by an uncomfortably strong baseline:</p>
+<p>On the short-context tasks, transfer works, but the 4B model on its own is a strong baseline:</p>
 <div class="post-table">
 <div class="post-table__wrap">
 <table class="caption-top table">
@@ -206,11 +208,11 @@
 </table>
 </div>
 </div>
-<p>Qwen3.5-4B is simply very good at 4k-token QA. On these tasks, letting it answer by itself is as good as transferring its reading to the 27B, or better. So the case for transfer has to be made where the small model is genuinely weaker: long, hard contexts. That is the next experiment.</p>
+<p>Qwen3.5-4B does well on these roughly 4k-token QA tasks. Letting it answer on its own is as good as transfer or better. So I next tried longer, harder contexts, where the smaller model might have more to gain from the 27B.</p>
 </section>
-<section id="experiment-3-long-context-prefill-8k-to-248k-tokens" class="level2">
-<h2 class="anchored" data-anchor-id="experiment-3-long-context-prefill-8k-to-248k-tokens">Experiment 3: long-context prefill, 8k to 248k tokens</h2>
-<p>This is the experiment that matters most for the idea. Prefill grows faster than linearly with length, so the time saved should grow with the context. The question is whether quality survives at lengths far beyond what the mapper was trained on: prefixes of at most 2k tokens.</p>
+<section id="long-context" class="level2">
+<h2 class="anchored" data-anchor-id="long-context">Experiment 3: long-context prefill, 8k to 248k tokens</h2>
+<p>The short-context results left me with another question: would transfer be more useful when the prompt gets really long? Long contexts are also where saving prefill time could matter most. I wanted to see how much time transfer saves as the prompt grows, and whether it still works beyond the mapper’s training length of at most 2k tokens.</p>
 <p>I built a dedicated benchmark (<code>make_long_data.py</code>) with two parts:</p>
 <ul>
 <li><strong>Needle in a haystack:</strong> 20 prompts at each of 8k, 16k, 32k, 64k, 128k and 248k tokens, each with 4 keys to retrieve. This checks retrieval.</li>
@@ -232,7 +234,7 @@
   <figcaption>Drag the slider. Transfer is 2.16× faster than the 27B's own prefill at 8k, rising to 2.36× at 128k (19.9 s → 8.4 s). Natively, the 4B's time to first token is 4–6× lower than the 27B's, which is the room left for a real serving implementation.</figcaption>
 </figure>
 <p>Most of the gap between the measured 2.2–2.4× and the 4–6× ceiling is the DeltaNet state fill. The 27B still runs its 48 DeltaNet kernels over the full prompt, just without their outputs. That is why the transfer pipeline costs about 1.75× the 4B prefill alone (8.4 s vs 4.8 s at 128k).</p>
-<p>Quality held up far better than I expected.</p>
+<p>The quality results were better than I expected:</p>
 <div class="post-table">
 <div class="post-table__wrap">
 <table class="caption-top table">
@@ -278,16 +280,16 @@
   </div>
   <figcaption>Per-question LongBench v2 results. The "transfer vs 27B" tab shows where they disagree. Transfer matches the 27B through 64k tokens, then falls back toward the 4B on the longest third (0.45 vs 0.62), which is the first sign of the mapper's 2k-token training horizon.</figcaption>
 </figure>
-<p>What I take from this:</p>
+<p>A few things stood out:</p>
 <ul>
 <li><strong>On long-context reasoning, transfer recovers most of the 27B’s advantage.</strong> It scores 0.50 against the 27B’s 0.52, while the 4B alone scores 0.39. The difference from the 27B is within noise; the difference from the 4B is not.</li>
 <li><strong>Retrieval survives at lengths 100× beyond training.</strong> A mapper trained on prefixes of at most 2k tokens produced a cache from which the 27B found every needle at 248k tokens.</li>
 <li><strong>The NIAH result is saturated</strong>, though: the 4B alone also gets 100%. It shows that transfer doesn’t <em>break</em> retrieval; it says nothing about whether transfer helps. LongBench v2 is the discriminative number, and the length breakdown suggests that training on longer prefixes is the obvious next step.</li>
 </ul>
 </section>
-<section id="experiment-4-dense-moe-qwen3.5-4b-qwen3.5-35b-a3b" class="level2">
-<h2 class="anchored" data-anchor-id="experiment-4-dense-moe-qwen3.5-4b-qwen3.5-35b-a3b">Experiment 4: dense → MoE (Qwen3.5-4B → Qwen3.5-35B-A3B)</h2>
-<p>Does the map care whether the big model is a mixture of experts? Not much. Using the same recipe, ridge KL goes from 0.175 to 0.066 after training, top-1 agreement is 0.889, and task scores are the best of any pair:</p>
+<section id="dense-moe" class="level2">
+<h2 class="anchored" data-anchor-id="dense-moe">Experiment 4: dense → MoE (Qwen3.5-4B → Qwen3.5-35B-A3B)</h2>
+<p>The hybrid model worked, so I wanted to see if transfer would also work when the larger model was a mixture of experts (MoE). I tried transferring from a dense model to an MoE. The same recipe worked here too: KL dropped from 0.175 to 0.066 after training, top-1 agreement reached 0.889, and task scores were the best of any pair I tried:</p>
 <div class="post-table">
 <div class="post-table__wrap">
 <table class="caption-top table">
@@ -328,12 +330,12 @@
 </table>
 </div>
 </div>
-<p>But it is pointless as an optimisation. The MoE activates about 3B parameters per token, fewer than the dense 4B that would replace it in prefill. At 8k tokens the 35B-A3B prefills in 0.23 s and the 4B in 0.18 s. Once the maps and the DeltaNet fill are added, transfer is 0.88–1.03× the native speed: slower at every length except 2k. This is a feasibility result: the cache of a sparse model can be predicted from a dense one. For speed, you would pair a much larger MoE with a much smaller reader.</p>
+<p>But for this pair, transfer does not help much with speed. The MoE activates about 3B parameters per token, fewer than the dense 4B that would replace it in prefill. At 8k tokens the 35B-A3B prefills in 0.23 s and the 4B in 0.18 s. Once the maps and the DeltaNet fill are added, transfer is 0.88–1.03× the native speed: slower at every length except 2k. This is a feasibility result: the cache of a sparse model can be predicted from a dense one. For speed, you would pair a much larger MoE with a much smaller reader.</p>
 <p>I also tried google/gemma-4-E4B → gemma-4-26B-A4B, and it is blocked by a library bug. In transformers 5.23, Gemma-4’s cached decoding path disagrees with its own full forward pass (KL 0.10 on a continuation even with the exact cache), so any transfer number would measure the bug, not the mapper. I stopped there and kept a small script that reproduces the mismatch.</p>
 </section>
-<section id="experiment-5-across-model-families-and-tokenizers" class="level2">
-<h2 class="anchored" data-anchor-id="experiment-5-across-model-families-and-tokenizers">Experiment 5: across model families and tokenizers</h2>
-<p>This was the long shot. If the small and big models come from different families, they don’t even agree on what a token is. Here the reader is Qwen3-4B and the decoder Gemma3-12B, then the reverse: Gemma3-4B → Qwen3-14B.</p>
+<section id="cross-family" class="level2">
+<h2 class="anchored" data-anchor-id="cross-family">Experiment 5: across model families and tokenizers</h2>
+<p>Finally, I tried transferring between model families. This adds a problem: the two models use different tokenizers, so they may split the same text differently. I tried Qwen3-4B → Gemma3-12B, and then Gemma3-4B → Qwen3-14B.</p>
 <p>The small model reads the same text with its own tokenizer, and every big-model position needs a small-model position to read from. The rule I settled on is character-based: each big token takes the small token that covers its <strong>last character</strong>. On top of that:</p>
 <ul>
 <li>the big model’s own token embedding is added as an extra input to the mapper, which is cheap since it is a lookup;</li>
@@ -351,7 +353,7 @@
   </div>
   <figcaption>Hover a big-model token to see which small-model position it reads. Each line drops from the big token's last character into the small token that contains it.</figcaption>
 </figure>
-<p>The result is a partial success at best:</p>
+<p>The results are mixed:</p>
 <div class="post-table">
 <div class="post-table__wrap">
 <table class="caption-top table">
@@ -397,8 +399,8 @@
 <p>For reference, the big models on their own score 0.806 / 0.646 / 0.917 (Gemma3-12B) and 0.789 / 0.655 / 0.945 (Qwen3-14B).</p>
 <p>In the Qwen → Gemma direction, the translated cache demonstrably carries the document: QA scores sit far above closed book. But Qwen3-4B on its own already scores 0.738 on this SQuAD setup, so the transfer is worse than not transferring at all. The Gemma → Qwen direction mostly fails: HotpotQA lands <em>below</em> closed book, which means the cache actively misleads the decoder. A curiosity: that direction reaches the better fidelity KL (0.135) and the worse task scores. Matching the next-token distribution on web text is not the same as preserving what a QA prompt needs.</p>
 </section>
-<section id="what-id-take-away" class="level2">
-<h2 class="anchored" data-anchor-id="what-id-take-away">What I’d take away</h2>
+<section id="what-i-learned" class="level2">
+<h2 class="anchored" data-anchor-id="what-i-learned">What I learned</h2>
 <ul>
 <li><strong>Treat transfer as a dial, not a switch.</strong> The most useful result here is the partial-layer one. Let the big model compute its bottom layers, map the top ones, and choose the split from the quality you need. It turns “is cache transfer good enough?” into an engineering trade-off.</li>
 <li><strong>The case for transfer is long context.</strong> On 4k-token QA a strong 4B can just answer by itself. On LongBench v2 it can’t, and the transferred cache recovers nearly all of the 27B’s advantage while cutting prefill by 2.2–2.4×, with headroom to roughly 4–6× in a real serving stack.</li>
@@ -406,7 +408,7 @@
 <li><strong>Pick pairs by active compute, not parameter count.</strong> Dense → MoE transfers beautifully and saves nothing.</li>
 <li><strong>Cross-family transfer is not there yet.</strong> A character-level alignment is enough to carry content, but not enough to beat the small model alone.</li>
 </ul>
-<p>What I’d run next:</p>
+<p>There are a few things I’d like to try next:</p>
 <ul>
 <li>train the 27B mapper on long prefixes (16k–64k) to close the gap past 64k tokens;</li>
 <li>harder long-context tasks than NIAH;</li>
