@@ -37,7 +37,7 @@ ul.task-list li input[type="checkbox"] {
 <link href="../site_libs/quarto-html/quarto-syntax-highlighting-46f4cc9626f044588a66931b604fc9c8.css" rel="stylesheet" id="quarto-text-highlighting-styles">
 <script src="../site_libs/bootstrap/bootstrap.min.js"></script>
 <link href="../site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
-<link href="../site_libs/bootstrap/bootstrap-e7be48f2a36eec99aaa50c76701ef22a.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="light">
+<link href="../site_libs/bootstrap/bootstrap-10dbc3b30c56e709ef968db695ee0085.min.css" rel="stylesheet" append-hash="true" id="quarto-bootstrap" data-mode="light">
 <script id="quarto-search-options" type="application/json">{
   "language": {
     "search-no-results-text": "No results",
@@ -118,6 +118,8 @@ gtag('config', 'G-EKSMXY3E8G', { 'anonymize_ip': true});
   font-size: 13px; color: var(--kt-ink2);
 }
 .kt-setup.open { display: block; }
+.kt-fig .kt-pseudocode { overflow-x: auto; margin: 10px 0; padding: 14px; border-radius: 6px; background: #1f2328 !important; color: #f0f2f4 !important; font: 12px/1.6 var(--kt-mono); }
+.kt-fig .kt-pseudocode code { display: block; padding: 0 !important; background: transparent !important; color: inherit !important; font-size: inherit !important; white-space: pre; }
 .kt-setup p { margin: 0 0 6px; line-height: 1.5; font-size: 13px; }
 .kt-setup ul { margin: 0; padding-left: 18px; }
 .kt-setup li { margin: 2px 0; }
@@ -287,14 +289,14 @@ gtag('config', 'G-EKSMXY3E8G', { 'anonymize_ip': true});
 </header>
 
 
-<p>A model lab recently launched a <a href="https://x.com/hannah_chuu/status/2122408763915477217?a=5TYRFYJkAs3yCumU--s&amp;s=20">KV Prefill SDK</a>. They showed that a smaller model like Qwen3.5-4B can handle prefill for a bigger model. Since the smaller model does less compute, this can save a lot of prefill time.</p>
-<p>That got me thinking. If a small model can read for a bigger one, how much of that work can we actually hand over? Does the big model need a transferred cache for every layer, or can it do part of the prefill itself? And does this still work when the context gets much longer, or when the two models have different architectures and tokenizers?</p>
-<p>I wanted to find out, so I started with a reproduction and followed those questions through a set of experiments:</p>
+<p>In <a href="https://onetriangle.ai/blog/cache-transfer"><em>How do we transfer context between models?</em></a>, OneTriangle explore an interesting idea: a smaller model like Qwen3.5-4B can handle prefill for a bigger model. Since the smaller model needs less compute, this can save a lot of prefill time.</p>
+<p>That got me thinking: if a smaller model can handle prefill, we could do that work with a smaller compute budget and fit in more requests. That could help boost throughput for a given amount of compute.</p>
+<p>I wanted to see whether this idea works in practice, so I started by reproducing the recipe. From there, I tried a few different model pairs and ways of sharing the work:</p>
 <ul>
-<li><a href="#reproduction">Can I reproduce the basic recipe?</a></li>
+<li><a href="#reproduction">Reproduce the recipe on a simpler Qwen model pair and see whether it works</a></li>
+<li><a href="#hybrid">Can this work with a hybrid DeltaNet model?</a></li>
 <li><a href="#partial-layers">What happens if I transfer only some layers?</a></li>
 <li><a href="#native-tail">What if the big model reads the end of the prompt itself?</a></li>
-<li><a href="#hybrid">Can this work with a hybrid DeltaNet model?</a></li>
 <li><a href="#long-context">Does it hold up on long contexts?</a></li>
 <li><a href="#dense-moe">Can a dense model prefill for a mixture of experts?</a></li>
 <li><a href="#cross-family">What happens across model families and tokenizers?</a></li>
@@ -302,29 +304,162 @@ gtag('config', 'G-EKSMXY3E8G', { 'anonymize_ip': true});
 <p>Before getting into those experiments, here is a quick primer on the KV cache and what gets transferred.</p>
 <section id="a-quick-primer-on-kv-cache" class="level2">
 <h2 class="anchored" data-anchor-id="a-quick-primer-on-kv-cache">A quick primer on KV cache</h2>
-<p>When a transformer reads a prompt, its layers write keys and values to the KV cache. The model then uses that cache to generate an answer. Building the cache is called prefill, and it can take a while for long prompts. A bigger model generally needs more compute to do this work.</p>
-<p>In <a href="https://onetriangle.ai/blog/cache-transfer"><em>How do we transfer context between models?</em></a>, OneTriangle explore an interesting idea: let a small model read the prompt, then use a learned mapper to turn its states into a cache the bigger model can use. Their main example is Qwen3.5-4B → Qwen3.8-27B. I wanted to reproduce the idea and see where it works and where it breaks.</p>
+<p>Generating a response has two parts: <strong>prefill</strong> and <strong>decode</strong>.</p>
+<p>During prefill, the model processes the prompt tokens. In each attention layer, it computes queries, keys and values. Each token uses its query to attend to the keys and values of the tokens it is allowed to see. The model saves the keys and values for the prompt in a KV cache, and uses the prefill output to predict the first response token.</p>
+<p>During decode, the model generates the rest of the response one token at a time. At each step, it processes the latest token and computes its query, key and value. It uses the new query to attend to the cached keys and values from the prompt and earlier generated tokens, then adds the new key and value to the cache. That way it can use the earlier context without recomputing its keys and values at every step.</p>
+<p>For a long prompt, prefill can take a while because the model has to process all those prompt tokens before it starts generating. A bigger model generally needs more compute for that work. The idea behind cache transfer is to let a smaller model do that reading, then use a learned mapper to turn its states into a cache the bigger model can use.</p>
 <figure class="kt kt-fig figure" id="kt-method">
-  <div class="kt-head"><div class="kt-tabs-slot"></div><button class="kt-setup-btn" type="button">ⓘ Setup</button></div>
+  <div class="kt-frame"><div class="kt-body"></div></div>
+  <figcaption>In normal prefill, the big model processes the prompt and builds its own KV cache. It then uses that cache to generate the answer.</figcaption>
+</figure>
+</section>
+<section id="the-recipe-a-small-model-reads-for-a-big-model" class="level2">
+<h2 class="anchored" data-anchor-id="the-recipe-a-small-model-reads-for-a-big-model">The recipe: a small model reads for a big model</h2>
+<p>OneTriangle describe this recipe in their <a href="https://onetriangle.ai/blog/cache-transfer">cache-transfer post</a>. To reproduce it, we freeze both models and train a <strong>mapper</strong>: a set of linear maps that turns the small model’s states into keys and values for the big model’s cache. We build separate maps for the keys and values of each target layer. The layer-selection method and settings below describe our implementation.</p>
+<section id="stage-1-fit-a-direct-map" class="level3">
+<h3 class="anchored" data-anchor-id="stage-1-fit-a-direct-map">Stage 1: fit a direct map</h3>
+<p>First, we run both models on the same text and collect the keys and values their layers produce. For each big-model layer, we test how well each small-model layer can predict its keys. We use <strong>ridge regression</strong> to fit a linear map: it looks for a close match while keeping the map’s weights from becoming too large. We select the three small-model layers with the lowest prediction error, combine their outputs, and fit a new map using all three. We repeat the process separately for values.</p>
+<p>The picture below follows one of those maps. Each block represents a layer; the counts are illustrative. The highlighted small-model layers supply the input for one big-model layer. We repeat this for every target layer to build its cache.</p>
+<figure class="kt kt-fig figure" id="ridge-recipe">
+  <div class="kt-head"><div class="kt-tabs" role="tablist" aria-label="Mapping explanation"><button class="kt-tab on" type="button" role="tab" aria-selected="true" aria-controls="ridge-algorithm" id="ridge-algorithm-tab">Algorithm</button><button class="kt-tab" type="button" role="tab" aria-selected="false" aria-controls="ridge-code" id="ridge-code-tab" tabindex="-1">Code</button></div></div>
   <div class="kt-frame">
-    <div class="kt-setup">
-      <p><b>Both models stay frozen.</b> The only trained parameters are the mapper's: per big-model layer, a linear map from the concatenated states of its top-3 source layers to that layer's K and V.</p>
-      <ul>
-        <li><b>Stage 1, ridge:</b> solve <code>(XᵀX + λI) W₀ = XᵀY</code> on ~1M fineweb-edu tokens, with pre-RoPE keys on both sides.</li>
-        <li><b>Stage 2, KL distillation:</b> <code>W = W₀ + A·B</code> with rank 64 (B starts at zero). A document is split into a prefix (512–2048 tokens) and a 128-token continuation. The teacher is the big model reading everything; the student is the big model reading only the continuation, on top of the mapped prefix cache. The loss is KL(teacher ‖ student) on the continuation.</li>
-        <li>AdamW, lr 2e-4, 8 docs per step, 1,000–1,500 steps. Maps in bf16 at inference.</li>
-      </ul>
+    <div id="ridge-diagram" style="padding: 20px; overflow-x: auto;">
+    <svg viewbox="0 0 760 345" role="img" aria-label="Three selected layers from the small model feed a ridge mapper that predicts the cache for one layer of the larger model. Other layers receive their own maps." style="display:block; width:100%; min-width:550px; height:auto; font-family:inherit;">
+      <defs><marker id="recipe-arrow" viewbox="0 0 10 10" refx="9" refy="5" markerwidth="6" markerheight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#ed6b34"></path></marker></defs>
+      <text x="30" y="25" font-size="17" font-weight="600">Small model</text><text x="570" y="25" font-size="17" font-weight="600">Big model</text>
+      <text x="30" y="48" font-size="13" fill="#555">Reads the prompt</text><text x="570" y="48" font-size="13" fill="#555">Receives a mapped cache</text>
+      <g fill="#cceade"><rect x="30" y="94" width="150" height="22" rx="4"></rect><rect x="30" y="238" width="150" height="22" rx="4"></rect></g>
+      <g fill="#17a976"><rect x="30" y="130" width="150" height="22" rx="4"></rect><rect x="30" y="166" width="150" height="22" rx="4"></rect><rect x="30" y="202" width="150" height="22" rx="4"></rect></g>
+      <g fill="#f4d9cc"><rect x="570" y="66" width="150" height="19" rx="4"></rect><rect x="570" y="93" width="150" height="19" rx="4"></rect><rect x="570" y="120" width="150" height="19" rx="4"></rect><rect x="570" y="174" width="150" height="19" rx="4"></rect><rect x="570" y="201" width="150" height="19" rx="4"></rect><rect x="570" y="228" width="150" height="19" rx="4"></rect><rect x="570" y="255" width="150" height="19" rx="4"></rect></g>
+      <rect x="570" y="147" width="150" height="19" rx="4" fill="#ed6b34"></rect>
+      <path d="M180 141 L275 174 M180 177 L275 177 M180 213 L275 180" stroke="#17a976" stroke-width="2" fill="none"></path>
+      <rect x="275" y="139" width="198" height="76" rx="8" fill="#fff8f4" stroke="#ed6b34" stroke-width="2"></rect>
+      <text x="374" y="162" text-anchor="middle" font-size="15" font-weight="600">Ridge mapper</text><text x="374" y="184" text-anchor="middle" font-size="15">Yₜ = Xₛ₍ₜ₎ · W₀</text><text x="374" y="203" text-anchor="middle" font-size="12" fill="#555">combine → map</text>
+      <path d="M473 177 L555 156" stroke="#ed6b34" stroke-width="2" fill="none" marker-end="url(#recipe-arrow)"></path>
+      <text x="30" y="296" font-size="13" fill="#444">3 selected source layers</text><text x="570" y="296" font-size="13" fill="#444">One target layer t</text>
+      <text x="30" y="325" font-size="13" fill="#555">Other target layers have their own maps. Keys and values use separate selections.</text>
+    </svg>
     </div>
-    <div class="kt-body"></div>
+    <div id="ridge-algorithm" role="tabpanel" aria-labelledby="ridge-algorithm-tab" style="padding: 0 20px 20px;">
+      <p>These steps build the initial ridge maps. The numbers match the comments in the Code tab.</p>
+      <ol>
+        <li><b>Collect examples.</b> Run both frozen models on the same training text. From each layer, collect the keys before positional encoding (RoPE) and the values. These give us examples of what the small model produces and what the big model’s cache should contain.</li>
+        <li><b>Set up the fit.</b> Ridge regression finds a linear map that predicts the big model’s keys or values from the small model’s corresponding keys or values. It also penalizes large weights to make the fit more stable. The Code tab shows how we set the strength of that penalty.</li>
+        <li><b>Choose what to predict.</b> Start with the keys of one big-model layer. Follow steps 4–6 to build its key map, then repeat those steps for its values and for every other big-model layer.</li>
+        <li><b>Test each small-model layer.</b> Fit a separate map from that layer’s keys or values to the corresponding keys or values of the big-model layer. Measure how far the prediction is from the big model’s actual keys or values, relative to their size. We calculate this error on the same text used to fit the map.</li>
+        <li><b>Combine the best three.</b> Pick the three small-model layers with the lowest errors. Put their keys or values together and fit a new map that uses all three to predict the big-model layer’s corresponding keys or values.</li>
+        <li><b>Keep the result.</b> Save the selected layer numbers and the new map for this big-model layer. When we use the mapper later, those numbers tell us which small-model outputs to combine.</li>
+      </ol>
+      <p>The Code tab follows these same steps. The experiment code computes the fit in batches to avoid keeping every model output in memory.</p>
+    </div>
+    <div id="ridge-code" role="tabpanel" aria-labelledby="ridge-code-tab" hidden="" style="padding: 0 20px 20px;">
+      <p>Illustrative Python: <code>collect_kv</code> runs the frozen model and returns per-layer matrices; the regression and selection below mirror the experiment.</p>
+      <pre class="kt-pseudocode"><code>import numpy as np
+
+# 1. Run both models on the same text. Collect each layer’s keys
+# before RoPE and values, keeping the corresponding token outputs aligned.
+source = collect_kv(small_model, training_tokens)
+target = collect_kv(big_model, training_tokens)
+
+# 2. Ridge fit with the experiment's scaled regularization.
+def ridge_fit(X, Y):
+    n = X.shape[0]
+    gram = X.T @ X / n
+    cross = X.T @ Y / n
+    strength = 0.001 * np.diag(gram).mean()
+    return np.linalg.solve(gram + strength * np.eye(gram.shape[0]), cross)
+
+maps = {}
+# 3. Build separate maps for keys and values at every target layer.
+for kind in ("keys", "values"):
+    for t in range(len(target[kind])):
+        Y = target[kind][t]
+        errors = []
+
+        # 4. Fit and score each small-model layer on the same tokens.
+        for X in source[kind]:
+            W = ridge_fit(X, Y)
+            error = np.sum((Y - X @ W) ** 2) / np.sum(Y ** 2)
+            errors.append(error)
+
+        # 5. Combine the three best layers and fit a new joint map.
+        selected = sorted(np.argsort(errors)[:3].tolist())
+        X_selected = np.concatenate([source[kind][s] for s in selected], axis=1)
+        W0 = ridge_fit(X_selected, Y)
+
+        # 6. Retain both the source indices and weights for inference.
+        maps[(kind, t)] = {"source_layers": selected, "weights": W0}</code></pre>
+    </div>
   </div>
-  <figcaption>Switch between the two tabs. In normal prefill the big model reads every prompt token through every layer. With cache transfer the small model reads, and the mapper writes the big model's cache. Nothing is fine-tuned except the mapper.</figcaption>
+  <figcaption>For one target layer, we concatenate the selected source states X<sub>S(t)</sub> and map them to predicted keys or values Y<sub>t</sub>. The layer counts are illustrative.</figcaption>
+</figure>
+<p>We can use this ridge map as it is. In the Qwen3-0.6B → Qwen3-8B reproduction below, it reaches a KL of 0.42, compared with 0.73 when the big model gets no prefix. That is a useful starting point, but there is still room to improve.</p>
+</section>
+<section id="stage-2-train-a-correction" class="level3">
+<h3 class="anchored" data-anchor-id="stage-2-train-a-correction">Stage 2: train a correction</h3>
+<p>Next, we improve the ridge map by adding a trainable correction: <strong>W = W₀ + A·B</strong>. The two smaller matrices A and B let us adjust the map without training a full new matrix. Their product has rank 64, and B starts at zero, so training begins with the ridge map.</p>
+<p>We start with documents from FineWeb-Edu and tokenize them before training. We keep documents long enough for the largest split: at least 2,176 tokens. At each training step, we choose a prefix length between 512 and 2,048 tokens and sample documents from the training set. For each document, we take that many tokens from the beginning as the <strong>prefix</strong>, then take the next 128 tokens as the <strong>continuation</strong>. The prefix gives the models context, and the continuation gives us a way to compare their predictions.</p>
+<p>The <strong>teacher</strong> is the big model processing both parts with its own cache. For the <strong>student</strong>, the small model reads the prefix and the mapper builds a cache for it; the big model then processes the continuation using that mapped cache. We compare what the teacher and student predict at each continuation position, and train the correction to bring those predictions closer using KL divergence. Both language models remain frozen.</p>
+<p>We use AdamW at a learning rate of 2e-4, with 8 documents per step for 1,000–1,500 steps. At inference, the maps use bf16. In the same Qwen reproduction, this second stage brings KL down from 0.42 to 0.13.</p>
+<figure class="kt kt-fig figure" id="distill-recipe">
+  <div class="kt-head"><div class="kt-tabs" role="tablist" aria-label="Training explanation"><button class="kt-tab on" type="button" role="tab" aria-selected="true" aria-controls="distill-algorithm" id="distill-algorithm-tab">Algorithm</button><button class="kt-tab" type="button" role="tab" aria-selected="false" aria-controls="distill-code" id="distill-code-tab" tabindex="-1">Code</button></div></div>
+  <div class="kt-frame">
+    <div id="distill-algorithm" role="tabpanel" aria-labelledby="distill-algorithm-tab" style="padding:0 20px 20px;">
+      <p>The numbered steps match the comments in the Code tab.</p>
+      <ol>
+        <li><b>Start from the ridge map.</b> Keep W₀ fixed and add a rank-64 correction A·B. Initialize A randomly and B to zero, so the correction initially changes nothing. Freeze both language models.</li>
+        <li><b>Prepare documents.</b> Tokenize the FineWeb-Edu documents and keep those with at least 2,176 tokens. At each step, sample training documents and choose a prefix length between 512 and 2,048 tokens. Take that many tokens from the start of each document, followed by the next 128 tokens as the continuation.</li>
+        <li><b>Run the teacher.</b> Let the big model read the full document and record its predictions over the continuation. We do not update the teacher.</li>
+        <li><b>Run the student.</b> Let the small model read the prefix and use the mapper to build the big model’s cache. Then let the same big model read the continuation using that mapped cache and record its predictions.</li>
+        <li><b>Compare and update.</b> Measure the KL divergence between the teacher’s and student’s continuation predictions. Backpropagate through the student and mapper, and update only A and B with AdamW. Repeat for the training steps.</li>
+      </ol>
+    </div>
+    <div id="distill-code" role="tabpanel" aria-labelledby="distill-code-tab" hidden="" style="padding:0 20px 20px;">
+      <p>Illustrative PyTorch based on the training loop. The named helper functions represent model-specific cache handling; the real code also batches documents and schedules the learning rate.</p>
+      <pre class="kt-pseudocode"><code>import torch
+import torch.nn.functional as F
+
+# 1. Freeze the models and ridge weights; train only A and B.
+freeze(small_model, big_model, mapper.W0)
+initialize_random(mapper.A)
+initialize_zero(mapper.B)  # W = W0 + A @ B starts at W0
+optimizer = torch.optim.AdamW([mapper.A, mapper.B], lr=2e-4, weight_decay=0)
+
+for document in training_documents:
+    # 2. Sample tokenized training documents. Choose a prefix length;
+    # take that many tokens from the start and the next 128 as continuation.
+    prefix, continuation = split_document(document, prefix_length=(512, 2048),
+                                          continuation_length=128)
+
+    # 3. Teacher: big model reads prefix + continuation.
+    with torch.no_grad():
+        teacher_logits = continuation_logits(big_model, prefix, continuation)
+
+    # 4. Student: small model reads the prefix; mapper builds the cache.
+    # Keep gradients through the mapper and the frozen big model.
+    mapped_cache = map_prefix_cache(small_model, mapper, prefix)
+    student_logits = continuation_logits(big_model, continuation,
+                                         past_key_values=mapped_cache)
+
+    # 5. Compare distributions over continuation tokens; update A and B.
+    teacher_prob = F.softmax(teacher_logits, dim=-1)
+    student_log_prob = F.log_softmax(student_logits, dim=-1)
+    loss = F.kl_div(student_log_prob, teacher_prob, reduction="none")
+    loss = loss.sum(dim=-1).mean()
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()</code></pre>
+      <p>For clarity, <code>mapper.A</code> and <code>mapper.B</code> stand for all trainable correction matrices across the maps.</p>
+    </div>
+  </div>
 </figure>
 <p>Every experiment below is measured the same way:</p>
 <ul>
-<li><strong>Fidelity:</strong> KL and top-1 agreement with the big model’s own continuation, on 64 held-out fineweb-edu documents (2,048-token prefix, 128-token continuation).</li>
-<li><strong>Tasks:</strong> SQuAD (300 questions, paragraph hidden among distractors, ~4.2k tokens), HotpotQA (300, distractor setting padded to ~4.5k), and GSM8K (400, 8-shot chain of thought, ~1.1k tokens). The documents or exemplars are the transferred prefix. The question header is fed to the big model normally.</li>
+<li><strong>Fidelity:</strong> How closely the big model’s predictions with the transferred cache match its predictions with its own cache. We report KL divergence (lower is closer) and top-1 agreement (higher is closer), on 64 held-out FineWeb-Edu documents with a 2,048-token prefix and a 128-token continuation.</li>
+<li><strong>Tasks:</strong> <strong>SQuAD</strong> (300 questions, paragraph hidden among distractors, ~4.2k tokens), <strong>HotpotQA</strong> (300, distractor setting padded to ~4.5k), and <strong>GSM8K</strong> (400, 8-shot chain of thought, ~1.1k tokens). The documents or exemplars are the transferred prefix. The question header is fed to the big model normally.</li>
 <li><strong>Speed:</strong> wall-clock prefill at batch 1, best of 3, unless stated otherwise.</li>
 </ul>
+</section>
 </section>
 <section id="reproduction" class="level2">
 <h2 class="anchored" data-anchor-id="reproduction">Experiment 0: reproducing the recipe on Qwen3-0.6B → Qwen3-8B</h2>
@@ -379,7 +514,7 @@ gtag('config', 'G-EKSMXY3E8G', { 'anonymize_ip': true});
 <p>Here is what I found:</p>
 <ul>
 <li><strong>Bottom layers must stay native; top layers transfer well.</strong> Along <code>last:N</code>, GSM8K climbs smoothly as more of the bottom is computed natively: 69% → 76% → 88% → 94% → 97% of the 8B for 30 / 21 / 18 / 15 / 12 transferred layers. Speedup falls 2.4× → 1.55× → 1.35× → 1.23× → 1.14× along the way. Transferring the bottom half instead (<code>first:18</code>) is a disaster on GSM8K: 13%.</li>
-<li><strong>The knee is around 15–18 native layers out of 36.</strong> Above that you get most of the quality back. Below about 9 native layers, nothing beats transferring everything: you pay for the 8B’s layers and still sit near the all-transferred quality.</li>
+<li><strong>The trade-off looks most useful around 15–18 native layers out of 36.</strong> Above that you get most of the quality back. Below about 9 native layers, nothing beats transferring everything: you pay for the 8B’s layers and still sit near the all-transferred quality.</li>
 <li><strong>Interleaving works only if layer 0 is native.</strong> <code>every:2</code> (layer 0 native) lands right on the <code>last:18</code> point, 87% GSM8K at 1.31×. <code>keep:2</code> (layer 0 transferred) drops to 59%. Layer 0 is where the attention sink lives, and errors there propagate through everything above it.</li>
 <li><strong>Δ is not optional.</strong> Without the mapped residual, interleaved plans sit around 50% on every task. That makes them worse than transferring everything, at a similar speed.</li>
 </ul>
@@ -388,7 +523,7 @@ gtag('config', 'G-EKSMXY3E8G', { 'anonymize_ip': true});
 <section id="native-tail" class="level2">
 <h2 class="anchored" data-anchor-id="native-tail">Experiment 1b: letting the big model read the tail</h2>
 <p>Transferring fewer layers helped, but it also gave up some speed. That made me think about splitting the work another way: by tokens. Instead of transferring the whole prompt, the big model can read the last part itself, using the mapped cache for everything before it. In round 2, letting the 8B prefill the last 512 tokens brought KL down from 0.135 to 0.047. I combined this with partial-layer transfer: 6 layer plans and 5 tail sizes, evaluated on the same 300 / 300 / 400 prompts.</p>
-<p>The tail is set as a fraction of the prompt (none, 1/32, 1/16, 1/8, 1/4), not a token count, so its cost means the same thing on a 1.1k-token GSM8K prompt and a 4.5k-token HotpotQA one. Nothing is retrained: these are the Experiment 1 mappers, which never saw a tail during training. The tail is a pure inference-time knob.</p>
+<p>The tail is set as a fraction of the prompt (none, 1/32, 1/16, 1/8, 1/4), not a token count, so its cost means the same thing on a 1.1k-token GSM8K prompt and a 4.5k-token HotpotQA one. Nothing is retrained: these are the Experiment 1 mappers, which never saw a tail during training. We choose the tail size when running the model; we do not train the mapper again.</p>
 <figure class="kt kt-fig figure" id="kt-grid">
   <div class="kt-head"><div class="kt-tabs-slot"></div><button class="kt-setup-btn" type="button">ⓘ Setup</button></div>
   <div class="kt-frame">
@@ -551,7 +686,7 @@ gtag('config', 'G-EKSMXY3E8G', { 'anonymize_ip': true});
 <ul>
 <li><strong>On long-context reasoning, transfer recovers most of the 27B’s advantage.</strong> It scores 0.50 against the 27B’s 0.52, while the 4B alone scores 0.39. The difference from the 27B is within noise; the difference from the 4B is not.</li>
 <li><strong>Retrieval survives at lengths 100× beyond training.</strong> A mapper trained on prefixes of at most 2k tokens produced a cache from which the 27B found every needle at 248k tokens.</li>
-<li><strong>The NIAH result is saturated</strong>, though: the 4B alone also gets 100%. It shows that transfer doesn’t <em>break</em> retrieval; it says nothing about whether transfer helps. LongBench v2 is the discriminative number, and the length breakdown suggests that training on longer prefixes is the obvious next step.</li>
+<li><strong>The needle test does not distinguish the models here</strong>, though: the 4B alone also gets 100%. It shows that transfer doesn’t <em>break</em> retrieval; it says nothing about whether transfer helps. LongBench v2 is the discriminative number, and the length breakdown suggests that training on longer prefixes is the obvious next step.</li>
 </ul>
 </section>
 <section id="dense-moe" class="level2">
@@ -618,7 +753,7 @@ gtag('config', 'G-EKSMXY3E8G', { 'anonymize_ip': true});
     </div>
     <div class="kt-body"></div>
   </div>
-  <figcaption>Hover a big-model token to see which small-model position it reads. Each line drops from the big token's last character into the small token that contains it.</figcaption>
+  <figcaption>Hover a big-model token to see which small-model position it reads. Each line connects the big-model token’s last character to the small-model token that contains it.</figcaption>
 </figure>
 <p>The results are mixed:</p>
 <div class="post-table">
@@ -783,6 +918,33 @@ How these runs were made reproducible
     });
   });
 
+  // Switch between the ridge recipe's algorithm and code panels.
+  ["ridge", "distill"].forEach(prefix => {
+    const recipe = document.getElementById(prefix + "-recipe");
+    if (!recipe) return;
+    const buttons = [...recipe.querySelectorAll('[role="tab"]')];
+    function selectTab(active) {
+      const diagram = document.getElementById(prefix + "-diagram");
+      if (diagram) diagram.hidden = active.id === prefix + "-code-tab";
+      buttons.forEach(button => {
+        const selected = button === active;
+        button.classList.toggle("on", selected);
+        button.setAttribute("aria-selected", String(selected));
+        button.tabIndex = selected ? 0 : -1;
+        document.getElementById(button.getAttribute("aria-controls")).hidden = !selected;
+      });
+    }
+    buttons.forEach((button, i) => {
+      button.addEventListener("click", () => selectTab(button));
+      button.addEventListener("keydown", event => {
+        if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+        event.preventDefault();
+        const next = buttons[(i + (event.key === "ArrowRight" ? 1 : -1) + buttons.length) % buttons.length];
+        selectTab(next); next.focus();
+      });
+    });
+  });
+
   /* ------------------------------------------------------------------ method diagram */
   (function method() {
     const root = document.getElementById("kt-method");
@@ -791,8 +953,7 @@ How these runs were made reproducible
     const s = sv("svg", { viewBox: `0 0 ${W} ${H}`, class: "kt-svg", role: "img",
       "aria-label": "Small model prefills the prompt, a per-layer mapper turns its states into the big model's KV cache, the big model decodes." });
     const body = root.querySelector(".kt-body");
-    let mode = 1;
-    const sel = tabs(root.querySelector(".kt-tabs-slot"), ["Normal prefill", "Cache transfer"], i => { mode = i; draw(); });
+    let mode = 0;
     body.append(s);
     function box(x, y, w, h, fill, stroke) { return sv("rect", { x, y, width: w, height: h, rx: 8, fill, stroke, "stroke-width": 1.2 }); }
     function arrow(x1, y1, x2, y2, col, dash) {
@@ -838,16 +999,16 @@ How these runs were made reproducible
         s.append(sv("text", { x: mx + 12, y: my + 22, class: "kt-t-strong" }, "Mapper (the only thing trained)"));
         s.append(sv("text", { x: mx + 12, y: my + 42 }, "for each big layer t:"));
         s.append(sv("text", { x: mx + 12, y: my + 60, class: "kt-t-ink", "font-family": "monospace" }, "Y_t = X_S(t) · (W₀ + A·B)"));
-        s.append(sv("text", { x: mx + 12, y: my + 80 }, "S(t): top-3 source layers"));
+        s.append(sv("text", { x: mx + 12, y: my + 80 }, "X_S(t): states from 3 best-fit layers"));
         s.append(sv("text", { x: mx + 12, y: my + 98 }, "W₀: ridge fit, A·B: rank 64, KL"));
         s.append(sv("text", { x: mx + 12, y: my + 116 }, "then re-apply big-model RoPE"));
         s.append(arrow(sx + sw + 4, sy + 75, mx - 6, my + 60, C.ink2));
         s.append(arrow(mx + mw + 4, my + 60, bx - 6, 150, C.xfer));
-        s.append(sv("text", { x: 290, y: 100, class: "kt-t-ink" }, "the big model never sees the prompt tokens;"));
-        s.append(sv("text", { x: 290, y: 116 }, "it decodes from a cache it did not build"));
+        s.append(sv("text", { x: 290, y: 100, class: "kt-t-ink" }, "the small model reads the prompt;"));
+        s.append(sv("text", { x: 290, y: 116 }, "the big model decodes from its mapped cache"));
       }
     }
-    sel(1);
+    draw();
   })();
 
   /* ------------------------------------------------------------------ experiment 0: reproduction */
