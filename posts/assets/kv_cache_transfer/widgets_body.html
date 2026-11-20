@@ -82,7 +82,7 @@
   });
 
   // Switch between the ridge recipe's algorithm and code panels.
-  ["ridge", "distill"].forEach(prefix => {
+  ["ridge", "distill", "hybrid-map"].forEach(prefix => {
     const recipe = document.getElementById(prefix + "-recipe");
     if (!recipe) return;
     const buttons = [...recipe.querySelectorAll('[role="tab"]')];
@@ -192,11 +192,11 @@
         ["Qwen3-0.6B alone", "0.388", "0.029", "0.495"],
         ["8B, no context (closed book)", "0.248", "0.207", "–"]]),
         el("div", { class: "kt-note" }, "Post-training only helps the tasks it sees: holding GSM8K out of the task mix leaves GSM8K at 0.650.")],
-      () => [table(["small model", "fidelity KL", "SQuAD transfer / alone", "HotpotQA transfer / alone", "GSM8K transfer / alone", "prefill speedup 8k / 32k"], [
+      () => [table(["small model", "fidelity KL", "SQuAD F1: 8B / small model", "HotpotQA F1: 8B / small model", "GSM8K accuracy: 8B / small model", "prefill speedup 8k / 32k"], [
         ["Qwen3-0.6B", "0.128", "0.721 / 0.388", "0.461 / 0.029", "0.665 / 0.495", "4.6× / 3.5×"],
         ["Qwen3-1.7B", "0.098", "0.746 / 0.639", "0.515 / 0.149", "0.757 / <b>0.815</b>", "3.2× / 2.7×"],
         ["Qwen3-4B", "0.054", "0.774 / 0.738", "0.595 / 0.542", "0.877 / <b>0.915</b>", "1.4× / 1.2×"]]),
-        el("div", { class: "kt-note" }, "Big model is Qwen3-8B (0.738 / 0.603 / 0.925) in every row. Bold: the small model alone beats the transfer.")],
+        el("div", { class: "kt-note" }, "Each task cell shows two scores: Qwen3-8B answering with the small model’s transferred cache / the small model answering on its own. The 8B with its own cache scores 0.738 on SQuAD, 0.603 on HotpotQA, and 0.925 on GSM8K. Bold means the small model scores higher on its own.")],
       () => [legend([[C.big, "exact half"], [C.xfer, "mapped half"]]),
         bars([["both mapped", 0.135, C.xfer, "rank-16 mapper"], ["exact K, mapped V", 0.134, C.xfer, "fixing keys changes nothing"],
               ["mapped K, exact V", 0.094, C.big, "fixing values closes ~30% of the gap"]], 0.2, "KL to teacher (lower is better)"),
@@ -257,8 +257,8 @@
       if (b - a >= 2 || p.blocks.length < 6)
         svg.append(sv("text", { x: (xa + xb) / 2, y: yb + 20, "text-anchor": "middle", "font-size": 11, fill: p.delta ? C.ink : C.muted }, p.delta ? "Δ" : "no Δ"));
     });
-    svg.append(sv("text", { x: x0, y: y + h + 50, "font-size": 11 }, "layer 0 (bottom)"));
-    svg.append(sv("text", { x: x1, y: y + h + 50, "font-size": 11, "text-anchor": "end" }, `layer ${L - 1} (top)`));
+    svg.append(sv("text", { x: x0, y: y + h + 50, "font-size": 11 }, "layer 0 (first)"));
+    svg.append(sv("text", { x: x1, y: y + h + 50, "font-size": 11, "text-anchor": "end" }, `layer ${L - 1} (last)`));
     return p;
   }
 
@@ -280,8 +280,8 @@
       ["range:9-27", .293, .116, .697, .457, .682, 1.39, 1.41], ["keep:4/nodelta", .973, .233, .398, .357, .490, 2.05, 2.03],
       ["every:2/nodelta", .675, .212, .412, .329, .430, 1.34, 1.35]].map(r => ({ spec: r[0], klr: r[1], kl: r[2], squad: r[3], hotpot: r[4], gsm: r[5], s8: r[6], s32: r[7] }));
     const by = Object.fromEntries(D.map(d => [d.spec, d]));
-    const groups = [["top N", ["all", "last:33", "last:30", "last:27", "last:24", "last:21", "last:18", "last:15", "last:12", "last:9", "last:6"]],
-                    ["bottom N", ["first:27", "first:18"]], ["interleaved", ["every:2", "keep:2", "keep:4", "range:9-27"]],
+    const groups = [["last N", ["all", "last:33", "last:30", "last:27", "last:24", "last:21", "last:18", "last:15", "last:12", "last:9", "last:6"]],
+                    ["first N", ["first:27", "first:18"]], ["interleaved", ["every:2", "keep:2", "keep:4", "range:9-27"]],
                     ["no Δ", ["every:2/nodelta", "keep:4/nodelta"]]];
     const body = root.querySelector(".kt-body");
     let cur = "last:18", metric = "gsm";
@@ -565,7 +565,7 @@
       const max = Math.max(...[HF.big[i], SG.big[i]].filter(v => v != null));
       panels.innerHTML = "";
       panels.append(
-        panel("HuggingFace, 1 GPU, end to end (what I can run today)", [["Qwen3.8-27B prefill", HF.big, C.big], ["4B + transfer", HF.xfer, C.xfer, HF.big], ["4B prefill alone", HF.small, C.small, HF.big]], i, max),
+        panel("Hugging Face: end-to-end transfer, 1 GPU", [["Qwen3.8-27B prefill", HF.big, C.big], ["4B + transfer", HF.xfer, C.xfer, HF.big], ["4B prefill alone", HF.small, C.small, HF.big]], i, max),
         panel("SGLang native serving, time to first token", [["Qwen3.8-27B", SG.big, C.big], ["Qwen3.5-4B", SG.small, C.small, SG.big]], i, max));
       drawLine(i);
     }

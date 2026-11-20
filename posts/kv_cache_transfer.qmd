@@ -1,8 +1,7 @@
 ---
-title: "Let the small model read"
-subtitle: "KV-cache transfer from small to big models: which layers, which architectures, how long a context"
+title: "Let the small model prefill"
+subtitle: "Passing KV cache between language models"
 date: '2026-11-18'
-description: "Six experiments on KV-cache transfer: a small model prefills, a learned mapper translates its states, a frozen big model decodes. Partial-layer transfer, a hybrid DeltaNet 27B at 248k tokens, dense to MoE, and cross-tokenizer pairs."
 categories:
   - LLMs
   - Inference
@@ -26,6 +25,7 @@ That got me thinking: if a smaller model can handle prefill, we could do that wo
 I wanted to see whether this idea works in practice, so I started by reproducing the recipe. From there, I tried a few different model pairs and ways of sharing the work:
 
 - [Reproduce the recipe on a simpler Qwen model pair and see whether it works](#reproduction)
+- [Do keys or values matter more for the transferred cache?](#keys-values)
 - [Can this work with a hybrid DeltaNet model?](#hybrid)
 - [What happens if I transfer only some layers?](#partial-layers)
 - [What if the big model reads the end of the prompt itself?](#native-tail)
@@ -205,15 +205,19 @@ for document in training_documents:
 </figure>
 ```
 
-Every experiment below is measured the same way:
+Before looking at the results, let’s walk through how we evaluate each model pair.
 
-- **Fidelity:** How closely the big model’s predictions with the transferred cache match its predictions with its own cache. We report KL divergence (lower is closer) and top-1 agreement (higher is closer), on 64 held-out FineWeb-Edu documents with a 2,048-token prefix and a 128-token continuation.
-- **Tasks:** **SQuAD** (300 questions, paragraph hidden among distractors, ~4.2k tokens), **HotpotQA** (300, distractor setting padded to ~4.5k), and **GSM8K** (400, 8-shot chain of thought, ~1.1k tokens). The documents or exemplars are the transferred prefix. The question header is fed to the big model normally.
-- **Speed:** wall-clock prefill at batch 1, best of 3, unless stated otherwise.
+- **Next-token distribution agreement.** We give the big model a 2,048-token prefix and a 128-token continuation from each of 64 held-out FineWeb-Edu documents. We compare its next-token probability distributions when it uses the transferred prefix cache against when it builds the prefix cache itself. We report KL divergence, where lower means the distributions are closer, and top-1 agreement, where higher means the two runs more often assign the highest probability to the same token.
+- **Task accuracy.** We evaluate on **SQuAD** (300 questions, with the relevant paragraph hidden among distractors, about 4.2k tokens), **HotpotQA** (300 questions, with distractor documents padded to about 4.5k tokens), and **GSM8K** (400 questions, with eight worked examples in each prompt, about 1.1k tokens). The documents or worked examples make up the prefix whose cache we transfer. We feed the question header to the big model normally.
+- **Prefill time.** We measure elapsed prefill time for one request at a time and report the best of three runs, unless stated otherwise.
+
+The early reproduction uses 128 held-out documents for fidelity; later runs use 64. The long-context experiments also have their own task settings, which we’ll cover when we get there.
 
 ## Experiment 0: reproducing the recipe on Qwen3-0.6B → Qwen3-8B {#reproduction}
 
-I started by reproducing the method with Qwen3-0.6B and Qwen3-8B. The ridge map alone gets a KL of 0.42; giving the 8B no prefix at all gives 0.73. Adding the KL-trained low-rank correction brings it down to 0.13. That second step makes a big difference.
+We start with a simple transformer architecture that uses attention layers throughout. We choose Qwen3-0.6B as the small model and Qwen3-8B as the big model, and try the cache-transfer recipe on this pair before moving on to hybrid models.
+
+First, we use the direct weight mapping from Stage 1 to build the 8B’s prefix KV cache. We then feed the continuation to the 8B and record its next-token probability distributions. As a reference, we run the same continuation after letting the 8B build its own prefix cache. The average KL divergence between the two runs is 0.42. For another comparison, we run the 8B on the continuation without giving it the prefix or a prefix cache. Comparing that run’s next-token distributions with the reference run, where the 8B reads the prefix itself, gives a KL of 0.73. After we train the correction in Stage 2, the KL drops to 0.13, meaning the next-token distributions are closer to those from the 8B’s own cache. This metric compares token probabilities, not the KV values directly.
 
 ```{=html}
 <figure class="kt kt-fig" id="kt-repro">
@@ -229,23 +233,46 @@ I started by reproducing the method with Qwen3-0.6B and Qwen3-8B. The ridge map 
 </figure>
 ```
 
-A few things stood out from this first set of runs:
+Let’s look at what these results tell us.
 
-1. **Extractive QA is easy; reasoning is not.** SQuAD survives transfer almost perfectly. Multi-hop QA and GSM8K, where the answer is computed rather than copied, lose a quarter or more.
-2. **The baseline that matters is "small model alone", not "closed book".** With Qwen3-4B as the reader, the 4B on its own scores 0.915 on GSM8K and the transfer 0.877. The comparison only makes sense when the small model is clearly worse than the big one at the task.
-3. **Values, not keys, are the bottleneck here.** Giving the student the exact keys changes nothing (0.135 → 0.134), while exact values drop KL to 0.094. OneTriangle report the opposite for their pairs, so this is probably pair-dependent.
+1. **The transferred cache preserves more information for SQuAD than for the reasoning tasks.** With Qwen3-0.6B doing prefill and the 8B answering, SQuAD F1 is 0.721, close to 0.738 when the 8B builds its own cache. On HotpotQA, F1 drops from 0.603 to 0.461; on GSM8K, accuracy drops from 0.925 to 0.665.
+2. **We also need to compare against the small model answering on its own.** For example, when Qwen3-4B does prefill and the 8B answers using its cache, GSM8K accuracy is 0.877. But the 4B answers correctly 0.915 of the time on its own. In this case, adding the mapper and the 8B does not improve the score.
 
-On the new machine I re-ran the exact round-3 command. The fidelity KL came back at 0.129 against the original 0.128. Task scores moved by ±0.02–0.04 between independent training runs, which is the noise floor to keep in mind for every table below.
+We also repeat the round-3 run on a different machine using the same command. The average KL divergence between the 8B’s next-token distributions changes from 0.128 to 0.129. Task scores vary by about 0.02–0.04 between independent training runs, so we should keep that variation in mind when comparing the results below.
 
-## Experiment 1: partial-layer transfer {#partial-layers}
+## Experiment 1: which matters more, keys or values? {#keys-values}
 
-The reproduction worked, but the gap on reasoning made me wonder if the 8B needed to do some of the reading itself. Qwen3.5 mixes attention layers with linear-attention layers, which gave me a place to start: do we need to transfer every layer? Maybe the big model can compute some layers itself and use the small model's cache for the rest. That would let us trade some prefill speed for better quality.
+The first experiment tells us that the transferred cache changes the 8B’s next-token distributions. But the cache contains two different things: keys and values. We want to know which part contributes more to that change for Qwen3-0.6B → Qwen3-8B.
 
-To try this, I let the big model run over the prompt and replace each transferred layer with a stand-in:
+We use the rank-16 mapper trained in Experiment 0. To see how mapped keys and mapped values each affect the 8B’s next-token distributions, we run the 8B with three versions of the prefix KV cache:
 
-- The stand-in writes mapped K, V into the cache and skips the layer's compute.
-- A run of transferred layers followed by a native layer leaves a hole in the residual stream. A second mapped term, **Δ**, fills it: a prediction of how much the skipped block would have changed the hidden state.
-- Each plan gets its own ridge init and its own 1,500 steps of KL training, exactly as in Experiment 0.
+1. **Keys and values mapped from 0.6B:** use the mapper to build both parts of the cache.
+2. **8B keys, values mapped from 0.6B:** use the keys the 8B produces when it reads the prefix, and map the values from 0.6B.
+3. **Keys mapped from 0.6B, 8B values:** map the keys from 0.6B, and use the values the 8B produces when it reads the prefix.
+
+For each cache, we feed the continuation to the 8B and compare its next-token probability distributions with the distributions from the 8B reading the full prefix itself. We use 128 held-out FineWeb-Edu documents, with a 2,048-token prefix and a 128-token continuation. Lower KL divergence means the distributions are closer to the reference.
+
+::: {.post-table}
+:::: {.post-table__wrap}
+| Prefix cache used by the 8B | KL divergence | Top-1 agreement |
+|---|---:|---:|
+| Keys and values mapped from 0.6B | 0.135 | 0.842 |
+| 8B keys, values mapped from 0.6B | 0.134 | 0.844 |
+| Keys mapped from 0.6B, 8B values | 0.094 | 0.876 |
+::::
+:::
+
+Replacing the mapped keys barely changes the KL: 0.135 becomes 0.134. Replacing the mapped values brings it down to 0.094. In this test, the 8B’s own values help its next-token distributions more than its own keys do. OneTriangle reported the opposite for their model pairs, so we should not assume the same result for every pair.
+
+## Experiment 2: partial-layer transfer {#partial-layers}
+
+The transferred cache works well on SQuAD, but the 8B loses accuracy on the reasoning tasks. This raises a question: can we recover some of that accuracy by letting the 8B process part of the prompt itself?
+
+So far, we have transferred keys and values for every layer. This time, we let the 8B compute some layers during prefill and use mapped keys and values for the others. We can then compare how different choices affect accuracy and prefill time.
+
+For each layer we transfer, we skip the 8B’s layer computation and put the mapped keys and values into its cache. But there is another piece to handle: if the 8B needs to compute a layer after a group of skipped layers, it also needs a hidden state to pass into that layer. We train a second map, **Δ**, to estimate how the skipped layers would have changed that hidden state.
+
+We try different choices of layers to transfer. For each choice, we fit new initial maps and train them for 1,500 steps using the same KL-based method as Experiment 0.
 
 ```{=html}
 <figure class="kt kt-fig" id="kt-plans">
@@ -254,8 +281,8 @@ To try this, I let the big model run over the prompt and replace each transferre
     <div class="kt-setup">
       <p><b>Plan names</b> describe which of the 8B's 36 layers are <i>transferred</i>:</p>
       <ul>
-        <li><code>last:N</code> transfers the top N; the 8B computes its own bottom 36−N.</li>
-        <li><code>first:N</code> transfers the bottom N.</li>
+        <li><code>last:N</code> transfers the last N layers; the 8B computes its first 36−N layers.</li>
+        <li><code>first:N</code> transfers the first N layers.</li>
         <li><code>every:K</code> transfers every K-th layer, so layer 0 stays native.</li>
         <li><code>keep:K</code> keeps every K-th layer native, so layer 0 is transferred.</li>
         <li><code>range:A-B</code> transfers layers A to B−1.</li>
@@ -269,33 +296,47 @@ To try this, I let the big model run over the prompt and replace each transferre
 </figure>
 ```
 
-Here is what I found:
+Here’s what we see when we change which layers the 8B computes:
 
-- **Bottom layers must stay native; top layers transfer well.** Along `last:N`, GSM8K climbs smoothly as more of the bottom is computed natively: 69% → 76% → 88% → 94% → 97% of the 8B for 30 / 21 / 18 / 15 / 12 transferred layers. Speedup falls 2.4× → 1.55× → 1.35× → 1.23× → 1.14× along the way. Transferring the bottom half instead (`first:18`) is a disaster on GSM8K: 13%.
-- **The trade-off looks most useful around 15–18 native layers out of 36.** Above that you get most of the quality back. Below about 9 native layers, nothing beats transferring everything: you pay for the 8B's layers and still sit near the all-transferred quality.
-- **Interleaving works only if layer 0 is native.** `every:2` (layer 0 native) lands right on the `last:18` point, 87% GSM8K at 1.31×. `keep:2` (layer 0 transferred) drops to 59%. Layer 0 is where the attention sink lives, and errors there propagate through everything above it.
-- **Δ is not optional.** Without the mapped residual, interleaved plans sit around 50% on every task. That makes them worse than transferring everything, at a similar speed.
+**Keeping the first layers on the 8B improves GSM8K accuracy.** The 8B processes its 36 layers in order, from first to last. In these runs, we let it compute the first layers and transfer the cache for the last layers:
 
-One caveat: these speed numbers are for 0.6B → 8B in HuggingFace. Here, the small model and mapper make up a sizeable part of the cost. The trade-off may look different with a bigger target, where each native layer costs more.
+::: {.post-table}
+:::: {.post-table__wrap}
+| First layers computed by the 8B | Last layers transferred from 0.6B | GSM8K accuracy (% of 8B with its own cache) | Prefill speedup |
+|---:|---:|---:|---:|
+| 6 | 30 | 69% | 2.4× |
+| 15 | 21 | 76% | 1.55× |
+| 18 | 18 | 88% | 1.35× |
+| 21 | 15 | 94% | 1.23× |
+| 24 | 12 | 97% | 1.14× |
+::::
+:::
 
-## Experiment 1b: letting the big model read the tail {#native-tail}
+When we reverse the split and transfer the first 18 layers instead, GSM8K accuracy falls to 13% of the 8B’s accuracy with its own cache.
 
-Transferring fewer layers helped, but it also gave up some speed. That made me think about splitting the work another way: by tokens. Instead of transferring the whole prompt, the big model can read the last part itself, using the mapped cache for everything before it. In round 2, letting the 8B prefill the last 512 tokens brought KL down from 0.135 to 0.047. I combined this with partial-layer transfer: 6 layer plans and 5 tail sizes, evaluated on the same 300 / 300 / 400 prompts.
+- **Keeping 15–18 of the 36 layers on the 8B gives us a useful trade-off.** We recover much of the GSM8K accuracy while still reducing prefill time. With fewer than about nine layers computed by the 8B, the tested plans stay close to the accuracy of transferring every layer, but add the cost of running those layers.
+- **The layer we start with matters for the interleaved plans we tested.** Transferring every other layer while letting the 8B compute layer 0 gives 87% of the 8B’s GSM8K accuracy at a 1.31× prefill speedup. Keeping every other layer but transferring layer 0 gives 59%. Layer 0 contains the attention sink, so sensitivity to errors there may be one reason for the gap.
+- **The Δ map matters when we skip layers.** Without it, the tested interleaved plans reach around 50% of the 8B’s score on each task. They perform worse than transferring every layer, at a similar prefill speed.
 
-The tail is set as a fraction of the prompt (none, 1/32, 1/16, 1/8, 1/4), not a token count, so its cost means the
-same thing on a 1.1k-token GSM8K prompt and a 4.5k-token HotpotQA one. Nothing is retrained: these are the
-Experiment 1 mappers, which never saw a tail during training. We choose the tail size when running the model; we do not train the mapper again.
+These timings come from Qwen3-0.6B → Qwen3-8B in Hugging Face. The small model and the mapper account for a sizeable part of the work in this pair. The trade-off could look different with a larger target model, where running each layer may cost more.
 
+## Experiment 3: letting the big model read the tail {#native-tail}
+
+In Experiment 2, letting the 8B compute more layers improved accuracy, but reduced the prefill speedup. Now we try a different split: the 0.6B reads most of the prompt, and the 8B reads the final part itself using the mapped cache for the earlier tokens. We call that final part the **native tail**.
+
+In an earlier run, letting the 8B read the last 512 tokens reduced the average KL divergence between next-token distributions from 0.135 to 0.047. To see how this affects task scores and speed, we combine six layer plans from Experiment 2 with five tail sizes: none, 1/32, 1/16, 1/8, and 1/4 of the prompt. We evaluate each combination on the same 300 SQuAD, 300 HotpotQA, and 400 GSM8K questions.
+
+We express the tail as a fraction so it scales with the length of each prompt. We use the existing Experiment 2 mappers without retraining them; the 8B reads the tail at inference time.
 ```{=html}
 <figure class="kt kt-fig" id="kt-grid">
   <div class="kt-head"><div class="kt-tabs-slot"></div><button class="kt-setup-btn" type="button">ⓘ Setup</button></div>
   <div class="kt-frame">
     <div class="kt-setup">
       <ul>
-        <li><b>Grid:</b> plans <code>all</code>, <code>last:30</code>, <code>last:24</code>, <code>last:18</code>, <code>last:12</code>, <code>every:2</code> (the trained r64 mappers from Experiment 1) × a native tail of none, 1/32, 1/16, 1/8 or 1/4 of the transferred prompt.</li>
+        <li><b>Grid:</b> plans <code>all</code>, <code>last:30</code>, <code>last:24</code>, <code>last:18</code>, <code>last:12</code>, <code>every:2</code> (the trained r64 mappers from Experiment 2) × a native tail of none, 1/32, 1/16, 1/8 or 1/4 of the transferred prompt.</li>
         <li><b>Tail:</b> the mapped cache covers the prompt minus its tail; the 8B then prefills the tail through all of its layers, attending to the mapped cache. The question header after the prompt is fed to the 8B as before.</li>
         <li><b>Speedup:</b> the 8B's own prefill time divided by (0.6B prefill + maps + the 8B's native layers + the native tail), HF, bf16, batch 1, best of 3.</li>
-        <li>Tail 0 was re-run inside the grid rather than reused from Experiment 1, so every cell comes from the same run.</li>
+        <li>Tail 0 was re-run inside the grid rather than reused from Experiment 2, so every cell comes from the same run.</li>
       </ul>
     </div>
     <div class="kt-body"></div>
@@ -304,36 +345,156 @@ Experiment 1 mappers, which never saw a tail during training. We choose the tail
 </figure>
 ```
 
-The two choices help in different ways:
+Here’s what we see when we vary the layers and the tail:
 
-- **On GSM8K the tail is the dial that matters.** With every layer transferred, a tail of just 1/16 of the prompt takes GSM8K from 70% to 96% of the 8B, while prefill is still 2.5× faster at 8k tokens. For comparison, the best layer-only plan at similar quality, `last:12`, is barely faster than the 8B itself (1.12×). In this setup the math question is the last ~5% of the transferred prompt (median 5.3%), so a short tail means the 8B reads the question itself while the eight exemplars stay transferred. A 1/16 tail covers the whole question in two thirds of the prompts; even 1/32, which covers it fully in only 6%, already gets GSM8K to 87%.
-- **On HotpotQA the tail does nothing.** `all` sits at 74% for every tail size. The question is already read natively there; what transfer loses is multi-hop reasoning over the documents, and only native *layers* bring that back (89% at `last:12`, up to 94% with a tail on top).
-- **SQuAD barely moves** (91–95% everywhere): extraction survives transfer whatever the setting.
-- **A tail costs more at long contexts.** The tail's tokens attend to the whole mapped prefix, so `all` + 1/4 is 1.75× at 8k but 1.40× at 32k. At 2k tokens any tail drops the speedup to 0.8–1.0×, slower than no transfer at all in some cells, because my implementation runs the tail as a second forward pass with its own fixed overhead; a serving engine would fuse it into the same pass.
+- **A short tail improves GSM8K accuracy in this setup.** With every layer transferred and no tail, the 8B reaches 70% of its own GSM8K accuracy. Letting it read the last 1/16 of the prompt raises that to 96%, with a 2.5× prefill speedup at 8k tokens. The layer-only plan with similar accuracy, `last:12`, gives a 1.12× speedup. Here, the math question is near the end of the transferred prompt: its median length is 5.3% of the prompt. A 1/16 tail covers the whole question in two thirds of the prompts. A 1/32 tail covers the whole question in only 6% of prompts, but still raises accuracy to 87% of the 8B’s.
+- **The tail does not improve the all-transferred HotpotQA result.** It stays at 74% of the 8B’s score across the tail sizes. The 8B already reads the question header in this setup, while the documents remain transferred. Letting the 8B compute more layers raises the score to 89% with `last:12`; adding a tail raises it to as much as 94%.
+- **SQuAD changes little across the combinations.** Scores stay between 91% and 95% of the 8B’s score.
+- **The cost of the tail depends on context length.** With every layer transferred and a 1/4 tail, prefill is 1.75× faster at 8k tokens and 1.40× faster at 32k. At 2k tokens, the tested tails bring speedup down to 0.8–1.0×. Our implementation processes the tail in a second forward pass, which adds fixed overhead; a serving implementation could potentially reduce that overhead.
 
-The practical rule: **put the part that must be exact at the end, and let the big model read it.** For a prompt that ends in a question or an instruction, a native tail of a few percent buys back most of the quality at most of the speedup. For reasoning spread across a long context, it has to be native layers instead.
+For these prompts, letting the 8B read the final part helps most when it contains information the 8B needs to handle directly, as with the GSM8K questions. For HotpotQA, where the relevant information is spread across the transferred documents, computing more layers is more useful in this experiment.
 
-## Experiment 2: a hybrid big model (Qwen3.5-4B → Qwen3.8-27B) {#hybrid}
+## Experiment 4: a hybrid big model (Qwen3.5-4B → Qwen3.8-27B) {#hybrid}
 
-So far I had been using a small Qwen3 pair to explore these choices. Next I wanted to try the pair from the OneTriangle post: Qwen3.5-4B and Qwen3.8-27B. Both are hybrid models. Three out of four layers use **Gated DeltaNet**, a linear-attention layer with a recurrent state and a short convolution. The remaining layers use full attention.
+So far, we have used two Qwen3 models with attention layers throughout. Now we move to the pair from the OneTriangle post: Qwen3.5-4B and Qwen3.8-27B. Both are **hybrid models**: three out of every four layers use Gated DeltaNet, while the remaining layers use full attention.
 
-A DeltaNet layer has no per-token KV cache to map. Its "cache" is a fixed-size recurrent state that summarises the whole prefix. Mapping that state directly would mean predicting a large matrix from a sequence, so I don't. Instead, for each DeltaNet layer the mapper predicts the layer's **input**. The 27B's own DeltaNet kernel then runs over that input in a state-only mode: it builds the recurrent and convolution state and skips the output projection. Attention layers get mapped K and V as usual.
+The full-attention layers keep keys and values for each prefix token, which we can map as before. DeltaNet layers need a different approach. Instead of keeping a per-token KV cache, each layer maintains two fixed-size states:
+
+- A **recurrent state**, which the layer updates as it processes tokens and uses when processing the next token.
+- A **convolution state**, which holds the recent inputs needed by the layer’s short causal convolution.
+
+These states do not grow with the length of the prefix. During decoding, the layer continues updating them as it processes new tokens.
+
+### Building the DeltaNet states
+
+Rather than predict these states directly, we map the 4B’s hidden states to an estimate of the input to each 27B DeltaNet layer. We then use the 27B’s own DeltaNet computation to build the states from that estimated input. The diagram follows this path for one layer; the Algorithm and Code tabs show the steps in more detail.
+
+```{=html}
+<figure class="kt kt-fig" id="hybrid-map-recipe">
+  <div class="kt-head"><div class="kt-tabs" role="tablist" aria-label="DeltaNet state construction"><button class="kt-tab on" type="button" role="tab" aria-selected="true" aria-controls="hybrid-map-algorithm" id="hybrid-map-algorithm-tab">Algorithm</button><button class="kt-tab" type="button" role="tab" aria-selected="false" aria-controls="hybrid-map-code" id="hybrid-map-code-tab" tabindex="-1">Code</button></div></div>
+  <div class="kt-frame">
+    <div id="hybrid-map-diagram" style="padding:20px; overflow-x:auto;">
+      <svg viewBox="0 0 900 1040" role="img" aria-label="The small model processes the prefix. Its hidden states pass through a mapper to create the input for one DeltaNet layer in the larger model. The large layer builds convolution and recurrent states for decoding." style="display:block; width:100%; min-width:620px; height:auto; font-family:inherit;">
+        <defs><marker id="hybrid-map-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="#53625d"/></marker></defs>
+        <text x="30" y="32" font-size="18" font-weight="700" fill="#26312d">1. From the 4B to one layer of the 27B</text>
+        <text x="30" y="54" font-size="13" fill="#67736e">Blocks show layer types; the number of blocks is illustrative.</text>
+        <text x="86" y="89" font-size="15" font-weight="700" fill="#315b4a">Qwen3.5-4B</text><text x="590" y="89" font-size="15" font-weight="700" fill="#375276">Qwen3.8-27B</text>
+        <!-- Stylised layer stacks; arrows follow the prefix from first layer upward. -->
+        <g fill="#cce7db" stroke="#a6ceba"><rect x="85" y="110" width="174" height="30" rx="4"/><rect x="85" y="148" width="174" height="30" rx="4"/><rect x="85" y="186" width="174" height="30" rx="4"/><rect x="85" y="224" width="174" height="30" rx="4"/></g>
+        <g fill="#dce8f6" stroke="#bfd0e8"><rect x="580" y="110" width="174" height="30" rx="4"/><rect x="580" y="186" width="174" height="30" rx="4"/><rect x="580" y="224" width="174" height="30" rx="4"/><rect x="580" y="262" width="174" height="30" rx="4"/><rect x="580" y="338" width="174" height="30" rx="4"/></g>
+        <g fill="#c3d6f0" stroke="#9db8db"><rect x="580" y="148" width="174" height="30" rx="4"/><rect x="580" y="300" width="174" height="30" rx="4"/></g>
+        <rect x="578" y="184" width="178" height="34" rx="5" fill="none" stroke="#e27949" stroke-width="3"/>
+        <text x="666" y="207" text-anchor="middle" font-size="12" font-weight="700" fill="#294d7a">DeltaNet</text>
+        <text x="666" y="169" text-anchor="middle" font-size="12" fill="#294d7a">Full attention</text><text x="666" y="321" text-anchor="middle" font-size="12" fill="#294d7a">Full attention</text>
+        <text x="785" y="206" font-size="12" fill="#ae592d">one target</text><text x="785" y="222" font-size="12" fill="#ae592d">layer</text>
+        <path d="M172 324 V271" stroke="#53625d" stroke-width="2" marker-end="url(#hybrid-map-arrow)"/><rect x="91" y="332" width="162" height="36" rx="5" fill="#f0f2ee"/><text x="172" y="355" text-anchor="middle" font-size="13" fill="#4e5954">Prefix tokens</text>
+        <rect x="325" y="159" width="180" height="76" rx="6" fill="#fff1e7" stroke="#e8ab89"/><text x="415" y="187" text-anchor="middle" font-size="15" font-weight="700" fill="#a2461d">Mapper</text><text x="415" y="210" text-anchor="middle" font-size="12" fill="#8a604c">estimates layer input</text>
+        <path d="M259 163 H282 V180 H316 M259 201 H316 M259 239 H282 V222 H316" fill="none" stroke="#4b9c79" stroke-width="2" marker-end="url(#hybrid-map-arrow)"/>
+        <path d="M505 197 H565" fill="none" stroke="#e27949" stroke-width="2.5" marker-end="url(#hybrid-map-arrow)"/>
+        <text x="280" y="133" font-size="12" fill="#5d7066">selected 4B</text><text x="280" y="149" font-size="12" fill="#5d7066">hidden states</text>
+        <text x="415" y="279" text-anchor="middle" font-size="13" fill="#596860">The 27B’s attention layers use a separate path:</text><text x="415" y="298" text-anchor="middle" font-size="13" fill="#596860">map keys and values into the KV cache.</text>
+        <line x1="30" y1="400" x2="870" y2="400" stroke="#e0e5e1"/>
+        <text x="30" y="436" font-size="18" font-weight="700" fill="#26312d">2. Inside the selected DeltaNet layer</text>
+        <text x="30" y="458" font-size="13" fill="#67736e">The mapper supplies an estimated input for each prefix token.</text>
+        <!-- Input sequence: one illustrated vector per prefix position. -->
+        <text x="35" y="491" font-size="13" font-weight="700" fill="#76503d">Mapped inputs · one vector per prefix token</text>
+        <g stroke="#e4a889" stroke-width="1">
+          <rect x="35" y="510" width="74" height="12" rx="2" fill="#f3c9b0"/><rect x="35" y="527" width="74" height="12" rx="2" fill="#f3c9b0"/><rect x="35" y="544" width="74" height="12" rx="2" fill="#f3c9b0"/><rect x="35" y="561" width="74" height="12" rx="2" fill="#f3c9b0"/>
+        </g><text x="45" y="593" font-size="12" fill="#785f52">x₁  x₂  x₃  …</text>
+        <path d="M110 540 H145" fill="none" stroke="#53625d" stroke-width="2" marker-end="url(#hybrid-map-arrow)"/>
+        <rect x="154" y="500" width="145" height="78" rx="6" fill="#e0eafa" stroke="#aac3e2"/>
+        <text x="226" y="528" text-anchor="middle" font-size="14" font-weight="700" fill="#345375">QKV projection</text><text x="226" y="550" text-anchor="middle" font-size="12" fill="#5a7192">27B weights</text>
+        <path d="M299 540 H330" fill="none" stroke="#53625d" stroke-width="2" marker-end="url(#hybrid-map-arrow)"/>
+        <text x="350" y="491" font-size="13" font-weight="700" fill="#375779">Projected sequence</text>
+        <g stroke="#8faed5"><rect x="345" y="510" width="20" height="54" fill="#d8e8f8"/><rect x="368" y="510" width="20" height="54" fill="#d8e8f8"/><rect x="391" y="510" width="20" height="54" fill="#d8e8f8"/><rect x="414" y="510" width="20" height="54" fill="#b9d4f2"/><rect x="437" y="510" width="20" height="54" fill="#b9d4f2"/></g>
+        <path d="M412 505 v-7 h47 v7" fill="none" stroke="#a25429" stroke-width="2"/>
+        <path d="M460 540 H491" stroke="#53625d" stroke-width="2" marker-end="url(#hybrid-map-arrow)"/>
+        <rect x="500" y="500" width="151" height="78" rx="6" fill="#e0eafa" stroke="#aac3e2"/>
+        <text x="575" y="529" text-anchor="middle" font-size="14" font-weight="700" fill="#345375">Causal convolution</text><text x="575" y="550" text-anchor="middle" font-size="12" fill="#5a7192">mix nearby positions</text>
+        <path d="M651 540 H682" stroke="#53625d" stroke-width="2" marker-end="url(#hybrid-map-arrow)"/>
+        <g><rect x="693" y="502" width="49" height="65" rx="4" fill="#d6e7f8"/><rect x="748" y="502" width="49" height="65" rx="4" fill="#c8def4"/><rect x="803" y="502" width="49" height="65" rx="4" fill="#bad4f0"/></g>
+        <text x="717" y="539" text-anchor="middle" font-size="17" font-weight="700" fill="#345375">Q</text><text x="772" y="539" text-anchor="middle" font-size="17" font-weight="700" fill="#345375">K</text><text x="827" y="539" text-anchor="middle" font-size="17" font-weight="700" fill="#345375">V</text>
+        <text x="773" y="589" text-anchor="middle" font-size="12" fill="#5a7192">split into Q, K, V</text>
+        <!-- Separate gate projections feed the same update. -->
+        <path d="M72 562 V653 H152" fill="none" stroke="#53625d" stroke-width="2" marker-end="url(#hybrid-map-arrow)"/>
+        <rect x="161" y="620" width="155" height="68" rx="6" fill="#fff0e8" stroke="#e8ab89"/><text x="238" y="648" text-anchor="middle" font-size="14" font-weight="700" fill="#9f4b23">Gate projections</text><text x="238" y="669" text-anchor="middle" font-size="12" fill="#8e6a58">from mapped inputs</text>
+        <path d="M316 653 H491" fill="none" stroke="#53625d" stroke-width="2" marker-end="url(#hybrid-map-arrow)"/>
+        <path d="M773 567 V606 H575 V618" fill="none" stroke="#53625d" stroke-width="2" marker-end="url(#hybrid-map-arrow)"/>
+        <rect x="500" y="622" width="185" height="67" rx="6" fill="#e0eafa" stroke="#aac3e2"/><text x="592" y="649" text-anchor="middle" font-size="14" font-weight="700" fill="#345375">Gated DeltaNet</text><text x="592" y="669" text-anchor="middle" font-size="12" fill="#5a7192">update prefix memory</text>
+        <!-- Convolution state is the cached projected input window, before convolution. -->
+        <path d="M445 564 V754 H492" fill="none" stroke="#9562a5" stroke-width="2" marker-end="url(#hybrid-map-arrow)"/>
+        <rect x="500" y="726" width="188" height="66" rx="6" fill="#f1eaf8" stroke="#cbb9e5"/><text x="594" y="751" text-anchor="middle" font-size="14" font-weight="700" fill="#654b81">Convolution state</text><text x="594" y="771" text-anchor="middle" font-size="12" fill="#806f94">recent projected inputs</text>
+        <path d="M685 655 H716" stroke="#53625d" stroke-width="2" marker-end="url(#hybrid-map-arrow)"/>
+        <rect x="725" y="622" width="150" height="67" rx="6" fill="#f1eaf8" stroke="#cbb9e5"/><text x="800" y="648" text-anchor="middle" font-size="13" font-weight="700" fill="#654b81">Recurrent state</text><text x="800" y="669" text-anchor="middle" font-size="12" fill="#806f94">after the prefix</text>
+        <rect x="35" y="827" width="830" height="130" rx="8" fill="#f5f7f5" stroke="#e2e8e2"/>
+        <text x="52" y="856" font-size="14" font-weight="700" fill="#40584c">States saved for decoding</text>
+        <text x="52" y="880" font-size="13" fill="#59685f">The convolution state keeps the recent projected inputs; the recurrent state keeps the result</text>
+        <text x="52" y="901" font-size="13" fill="#59685f">of processing the prefix. The 27B updates both states as it processes new tokens.</text>
+        <text x="52" y="929" font-size="12" fill="#738078">Vector sizes and the number of token positions are illustrative; the gates come from separate projections.</text>
+      </svg>
+    </div>
+    <div id="hybrid-map-algorithm" role="tabpanel" aria-labelledby="hybrid-map-algorithm-tab" style="padding:0 20px 20px;">
+      <p>Let’s walk through how we build the 27B’s cache when we transfer every layer. Each step corresponds to a numbered comment in the Code tab.</p>
+      <ol>
+        <li><b>The 4B reads the prefix.</b> We run the prefix through the 4B and collect hidden states from the layers our maps use.</li>
+        <li><b>We build the cache for each full-attention layer.</b> We map the selected 4B hidden states to keys and values for that 27B layer. We apply the 27B’s positional encoding to the mapped keys, then put the keys and values into its cache.</li>
+        <li><b>We prepare the input for each DeltaNet layer.</b> We select 4B layers at similar relative depths, combine their hidden states, and map them to an estimated input for the 27B DeltaNet layer at every prefix position.</li>
+        <li><b>We build the convolution state.</b> The 27B layer projects the mapped inputs. We save the most recent projected inputs for decoding, then run the causal convolution over the projected sequence.</li>
+        <li><b>We build the recurrent state.</b> The convolution produces queries, keys and values. We pass them, along with gates computed from the mapped inputs, through the 27B’s Gated DeltaNet update. We save the resulting recurrent state. We skip the calculations used only to produce the layer’s output.</li>
+        <li><b>The 27B processes the continuation.</b> Its full-attention layers use the mapped keys and values; its DeltaNet layers use the convolution and recurrent states we just built.</li>
+      </ol>
+      <p>When we train the mapper, gradients pass through the state-building computation. We keep the 4B and 27B weights frozen.</p>
+    </div>
+    <div id="hybrid-map-code" role="tabpanel" aria-labelledby="hybrid-map-code-tab" hidden style="padding:0 20px 20px;">
+      <p>Illustrative Python based on <code>prefix_cache</code> and <code>deltanet_fill_state</code>. Named helpers stand for the model-specific tensor operations; the real implementation handles shapes, masks and cache updates.</p>
+      <pre class="kt-pseudocode"><code># 1. The 4B reads the prefix and supplies per-layer hidden states.
+small_states = collect_hidden_states(model_4b, prefix)
+cache_27b = empty_cache(model_27b)
+
+for layer in model_27b.layers:
+    if layer.uses_full_attention:
+        # 2. Map keys and values; apply the 27B's RoPE to the keys.
+        keys, values = mapper.attention_kv(small_states, layer)
+        keys = apply_target_rope(keys, prefix_positions)
+        cache_27b.store_kv(layer, keys, values)
+    else:
+        # 3. Use selected 4B layers to predict this DeltaNet's input.
+        x = mapper.deltanet_input(small_states, layer)
+
+        # 4. Project inputs and run the 27B's causal convolution.
+        projected = layer.project_qkv(x)
+        conv_state = recent_inputs(projected, layer.conv_kernel_size)
+        q, k, v = layer.causal_convolution_and_split(projected)
+
+        # 5. Build gates and run the 27B's gated recurrent update.
+        gates = layer.compute_gates(x)
+        recurrent_state = layer.gated_delta_update(q, k, v, gates)
+        cache_27b.store_states(layer, conv_state, recurrent_state)
+        # The layer's output-only projections are not needed here.
+
+# 6. The 27B uses the assembled cache to process the continuation.
+logits = model_27b(continuation, cache=cache_27b)</code></pre>
+    </div>
+  </div>
+  <figcaption>We show the state-building path for one DeltaNet layer. Each 27B layer has its own map.</figcaption>
+</figure>
+```
 
 ```{=html}
 <figure class="kt kt-fig" id="kt-hybrid">
   <div class="kt-head"><div class="kt-title">Qwen3.8-27B: 64 layers, 16 of them full attention</div><button class="kt-setup-btn" type="button">ⓘ Setup</button></div>
   <div class="kt-frame">
     <div class="kt-setup">
-      <p>Hover a layer to see what is mapped there. The plans other than <code>all</code> are ridge-only (no KL training), with speedups at 8k tokens and state-only DeltaNet stand-ins, measured in HF bf16 at batch 1.</p>
-      <p>Only <code>all</code> was KL-trained: rank 64, 1,000 steps, 8 docs per step, DDP across 2 GPUs. Ridge KL 0.191 → 0.069, top-1 agreement 0.884. Everything was implemented functionally, so the DeltaNet fill is differentiable and the mapper trains end to end through it.</p>
+      <p>Hover over a layer to see what we map. We measure prefill speedup at 8k tokens using Hugging Face, bf16, and one request at a time. For the plans other than <code>all</code>, we fit the initial maps but do not train a correction.</p>
+      <p>For <code>all</code>, where we transfer every layer, we also train the rank-64 correction for 1,000 steps with 8 documents per step across 2 GPUs. The average KL divergence between the 27B’s next-token distributions falls from 0.191 with the initial map to 0.069 after training; top-1 agreement reaches 0.884. We make the DeltaNet state computation differentiable so we can train the mapper through it.</p>
     </div>
     <div class="kt-body"></div>
   </div>
-  <figcaption>Transferring everything is 2.25× faster than the 27B's own prefill. Keeping the 16 attention layers native (<code>keep:4</code>) is the natural partial plan for a hybrid model, but it only buys 1.42×. Ridge KL is noticeably better for the partial plans, and none of them were trained.</figcaption>
+  <figcaption>At 8k tokens, transferring every layer gives a 2.25× prefill speedup. Letting the 27B compute its 16 full-attention layers gives a 1.42× speedup. The partial-layer maps have lower KL after the initial fit, but we have not trained their corrections.</figcaption>
 </figure>
 ```
 
-On the short-context tasks, transfer works, but the 4B model on its own is a strong baseline:
+Next, we compare task scores for the 27B using its own cache, the 27B using the transferred cache, and the 4B answering on its own:
 
 ::: {.post-table}
 :::: {.post-table__wrap}
@@ -346,9 +507,9 @@ On the short-context tasks, transfer works, but the 4B model on its own is a str
 ::::
 :::
 
-Qwen3.5-4B does well on these roughly 4k-token QA tasks. Letting it answer on its own is as good as transfer or better. So I next tried longer, harder contexts, where the smaller model might have more to gain from the 27B.
+On these QA tasks, the 4B answering on its own scores about as well as or better than the 27B using the transferred cache. On GSM8K, transfer scores 0.868 against the 4B’s 0.855. To see whether the larger model offers more of an advantage on longer contexts, we turn to long-context evaluation next.
 
-## Experiment 3: long-context prefill, 8k to 248k tokens {#long-context}
+## Experiment 5: long-context prefill, 8k to 248k tokens {#long-context}
 
 The short-context results left me with another question: would transfer be more useful when the prompt gets really long? Long contexts are also where saving prefill time could matter most. I wanted to see how much time transfer saves as the prompt grows, and whether it still works beyond the mapper's training length of at most 2k tokens.
 
@@ -378,15 +539,15 @@ For timing I measured two things. The first is the full transfer pipeline in Hug
 
 Most of the gap between the measured 2.2–2.4× and the 4–6× ceiling is the DeltaNet state fill. The 27B still runs its 48 DeltaNet kernels over the full prompt, just without their outputs. That is why the transfer pipeline costs about 1.75× the 4B prefill alone (8.4 s vs 4.8 s at 128k).
 
-The quality results were better than I expected:
+Now let’s compare answer quality. For LongBench v2, we report the fraction of 100 questions answered correctly. For the needle test, we report retrieval accuracy across prompts from 8k to 248k tokens, with 20 prompts at each length.
 
 ::: {.post-table}
 :::: {.post-table__wrap}
-| method | LongBench v2 (100 q) | NIAH, all lengths 8k–248k (20 per length) |
-|---|---|---|
-| Qwen3.8-27B itself | 0.52 | 100% |
-| **Qwen3.5-4B prefill → transfer** | **0.50** | **100% at every length** |
-| Qwen3.5-4B alone | 0.39 | 100% |
+| Prompt processing | Answering model | LongBench v2 accuracy | Needle retrieval accuracy |
+|---|---|---:|---:|
+| Qwen3.8-27B | Qwen3.8-27B | 52% | 100% |
+| **Qwen3.5-4B, with its cache mapped to the 27B** | **Qwen3.8-27B** | **50%** | **100% at every length** |
+| Qwen3.5-4B | Qwen3.5-4B | 39% | 100% |
 ::::
 :::
 
@@ -403,13 +564,11 @@ The quality results were better than I expected:
 </figure>
 ```
 
-A few things stood out:
+The LongBench v2 results show the clearest difference between the three setups. The 27B answers 52 of the 100 questions correctly when it reads the prompt itself, and 50 when it uses the transferred cache. The 4B answering on its own gets 39. With only 100 questions, we should be cautious about drawing conclusions from the small gap between the two 27B runs.
 
-- **On long-context reasoning, transfer recovers most of the 27B's advantage.** It scores 0.50 against the 27B's 0.52, while the 4B alone scores 0.39. The difference from the 27B is within noise; the difference from the 4B is not.
-- **Retrieval survives at lengths 100× beyond training.** A mapper trained on prefixes of at most 2k tokens produced a cache from which the 27B found every needle at 248k tokens.
-- **The needle test does not distinguish the models here**, though: the 4B alone also gets 100%. It shows that transfer doesn't *break* retrieval; it says nothing about whether transfer helps. LongBench v2 is the discriminative number, and the length breakdown suggests that training on longer prefixes is the obvious next step.
+On the needle test, the 27B retrieves every needle using the transferred cache, including at 248k tokens. That is well beyond the mapper’s training prefixes of at most 2k tokens. But the 4B answering on its own also retrieves every needle, so this test does not show whether transfer improves retrieval. The LongBench length breakdown gives us a more useful next step: train the mapper on longer prefixes and test whether that improves the results beyond 64k tokens.
 
-## Experiment 4: dense → MoE (Qwen3.5-4B → Qwen3.5-35B-A3B) {#dense-moe}
+## Experiment 6: dense → MoE (Qwen3.5-4B → Qwen3.5-35B-A3B) {#dense-moe}
 
 The hybrid model worked, so I wanted to see if transfer would also work when the larger model was a mixture of experts (MoE). I tried transferring from a dense model to an MoE. The same recipe worked here too: KL dropped from 0.175 to 0.066 after training, top-1 agreement reached 0.889, and task scores were the best of any pair I tried:
 
@@ -423,19 +582,21 @@ The hybrid model worked, so I wanted to see if transfer would also work when the
 ::::
 :::
 
-But for this pair, transfer does not help much with speed. The MoE activates about 3B parameters per token, fewer than the dense 4B that would replace it in prefill. At 8k tokens the 35B-A3B prefills in 0.23 s and the 4B in 0.18 s. Once the maps and the DeltaNet fill are added, transfer is 0.88–1.03× the native speed: slower at every length except 2k. This is a feasibility result: the cache of a sparse model can be predicted from a dense one. For speed, you would pair a much larger MoE with a much smaller reader.
+But for this pair, transfer does not help much with speed. The MoE activates about 3B parameters per token, fewer than the dense 4B that would replace it in prefill. At 8k tokens the 35B-A3B prefills in 0.23 s and the 4B in 0.18 s. Once the maps and the DeltaNet fill are added, transfer is 0.88–1.03× the native speed: slower at every length except 2k. This is a feasibility result: the cache of a sparse model can be predicted from a dense one. For speed, you would pair a much larger MoE with a much smaller prefiller.
 
 I also tried google/gemma-4-E4B → gemma-4-26B-A4B, and it is blocked by a library bug. In transformers 5.23, Gemma-4's cached decoding path disagrees with its own full forward pass (KL 0.10 on a continuation even with the exact cache), so any transfer number would measure the bug, not the mapper. I stopped there and kept a small script that reproduces the mismatch.
 
-## Experiment 5: across model families and tokenizers {#cross-family}
+## Experiment 7: across model families and tokenizers {#cross-family}
 
-Finally, I tried transferring between model families. This adds a problem: the two models use different tokenizers, so they may split the same text differently. I tried Qwen3-4B → Gemma3-12B, and then Gemma3-4B → Qwen3-14B.
+So far, we have transferred between models in the same family. Now we try two cross-family pairs: Qwen3-4B → Gemma3-12B and Gemma3-4B → Qwen3-14B.
 
-The small model reads the same text with its own tokenizer, and every big-model position needs a small-model position to read from. The rule I settled on is character-based: each big token takes the small token that covers its **last character**. On top of that:
+These pairs introduce a new challenge. Qwen3 and Gemma3 use different tokenizers, so they can split the same text into different tokens. To build the larger model’s cache, we need to decide which small-model position supplies the information for each large-model token.
 
-- the big model's own token embedding is added as an extra input to the mapper, which is cheap since it is a lookup;
-- the `<bos>` attention sink is taken exactly from the big model, a one-token prefill;
-- source layers are matched by relative depth.
+We align the tokens by character position. For each large-model token, we select the small-model token that contains its **last character**. We also make three changes to the mapper setup:
+
+- We add the large model’s token embedding as an input to the mapper. This only requires an embedding lookup.
+- We let the large model prefill the `<bos>` token and use its own keys and values for that attention sink.
+- We match source layers to target layers by their relative depth in each model.
 
 ```{=html}
 <figure class="kt kt-fig" id="kt-align">
@@ -455,40 +616,34 @@ The results are mixed:
 
 ::: {.post-table}
 :::: {.post-table__wrap}
-| pair | fidelity KL, ridge → trained | SQuAD F1 | HotpotQA F1 | GSM8K | big model closed book |
-|---|---|---|---|---|---|
-| Qwen3-4B → Gemma3-12B | 0.373 → 0.181 | 0.577 (72%) | 0.449 (69%) | 0.325 (35%) | 0.233 / 0.266 |
-| Gemma3-4B → Qwen3-14B | 0.873 → 0.135 | 0.380 (48%) | 0.104 (16%) | 0.242 (26%) | 0.276 / 0.270 |
+| Prefiller → answering model | KL before training | KL after training |
+|---|---:|---:|
+| Qwen3-4B → Gemma3-12B | 0.373 | 0.181 |
+| Gemma3-4B → Qwen3-14B | 0.873 | 0.135 |
 ::::
 :::
 
-For reference, the big models on their own score 0.806 / 0.646 / 0.917 (Gemma3-12B) and 0.789 / 0.655 / 0.945 (Qwen3-14B).
+The task scores compare each answering model using the transferred cache, using its own cache, and answering closed book. In the **closed-book** runs, we do not give the model the document or a document cache; the model still processes the question itself. We do not report a closed-book score for GSM8K.
+
+::: {.post-table}
+:::: {.post-table__wrap}
+| Prefiller | Answering model | SQuAD F1 | HotpotQA F1 | GSM8K accuracy |
+|---|---|---:|---:|---:|
+| Qwen3-4B, transferred cache | Gemma3-12B | 0.577 | 0.449 | 0.325 |
+| Gemma3-12B | Gemma3-12B | 0.806 | 0.646 | 0.917 |
+| None, closed book | Gemma3-12B | 0.233 | 0.266 | – |
+| Gemma3-4B, transferred cache | Qwen3-14B | 0.380 | 0.104 | 0.242 |
+| Qwen3-14B | Qwen3-14B | 0.789 | 0.655 | 0.945 |
+| None, closed book | Qwen3-14B | 0.276 | 0.270 | – |
+::::
+:::
 
 In the Qwen → Gemma direction, the translated cache demonstrably carries the document: QA scores sit far above closed book. But Qwen3-4B on its own already scores 0.738 on this SQuAD setup, so the transfer is worse than not transferring at all. The Gemma → Qwen direction mostly fails: HotpotQA lands *below* closed book, which means the cache actively misleads the decoder. A curiosity: that direction reaches the better fidelity KL (0.135) and the worse task scores. Matching the next-token distribution on web text is not the same as preserving what a QA prompt needs.
 
-## What I learned
+## Learnings:
 
-- **Treat transfer as a dial, not a switch.** The most useful result here is the partial-layer one. Let the big model compute its bottom layers, map the top ones, and choose the split from the quality you need. It turns "is cache transfer good enough?" into an engineering trade-off.
-- **The case for transfer is long context.** On 4k-token QA a strong 4B can just answer by itself. On LongBench v2 it can't, and the transferred cache recovers nearly all of the 27B's advantage while cutting prefill by 2.2–2.4×, with headroom to roughly 4–6× in a real serving stack.
-- **Hybrid models need a new trick, and it works.** Predict the DeltaNet layers' inputs and let the big model build its own recurrent state. That fill is also the remaining bottleneck.
-- **Pick pairs by active compute, not parameter count.** Dense → MoE transfers beautifully and saves nothing.
-- **Cross-family transfer is not there yet.** A character-level alignment is enough to carry content, but not enough to beat the small model alone.
-
-There are a few things I'd like to try next:
-
-- train the 27B mapper on long prefixes (16k–64k) to close the gap past 64k tokens;
-- harder long-context tasks than NIAH;
-- partial-layer plans on the hybrid 27B with KL training;
-- a transfer path inside SGLang, to find out how much of the 4–6× ceiling is real.
-
-<details>
-<summary>How these runs were made reproducible</summary>
-
-- **Hardware and software:** rounds 1–3 used NVIDIA RTX PRO 6000; round 4 used a different machine. Software: torch 2.15, transformers 5.23, flash-linear-attention 0.6, SGLang 0.5.22 in Docker.
-- **Job runner:** every job is one line in a single job file, executed by a small GPU scheduler. It handles FIFO order, GPU locks and `.done` markers, and launches each job with `PYTHONHASHSEED=0`.
-- **Evaluation:** identical sample counts in every experiment: KL on 64 docs, SQuAD 300, HotpotQA 300, GSM8K 400, LongBench v2 100, NIAH 20 per length.
-- **Logs:** every job's log is kept alongside its result JSON.
-- **Smoke test:** each new pair went through an end-to-end check (ridge → a few training steps → eval on a handful of prompts) before its real run.
-- **Rerun:** the round-3 headline result was re-run on the new hardware with the identical command, and reproduced (KL 0.128 vs 0.129).
-
-</details>
+- **Partial-layer transfer trades speed for accuracy.** Letting the larger model compute its first layers can recover accuracy while still reducing prefill time.
+- **Long contexts make a stronger case for transfer.** The larger model using a transferred cache performs close to its own-cache baseline on LongBench v2.
+- **Hybrid models need a different approach.** Mapping DeltaNet inputs lets the larger model build its recurrent and convolution states, but that computation adds cost.
+- **The prefiller’s compute matters for MoE models.** A smaller dense model does not necessarily prefill faster than a larger sparse model.
+- **Cross-family transfer needs more work.** Token alignment carries information across model families, but the tested transfers do not beat the small model answering on its own.
